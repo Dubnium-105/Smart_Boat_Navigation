@@ -7,6 +7,10 @@
 #include <vector>
 #include <base64.h> // 添加Base64编码库
 #include "img_converters.h" // 用于图像格式转换
+#include "esp_timer.h"
+#include "fb_gfx.h"
+#include "dl_lib.h"
+#include "esp_http_server.h"
 
 // 函数前置声明
 void setup_camera();
@@ -15,8 +19,9 @@ void setup_mpu();
 void motor_control(uint8_t ch, int speed);
 void process_command(String cmd);
 void send_sensor_data();
-void send_image();  // 修改为仅发送图像，不寻找最亮点
+void send_image();  // 修改为处理并发送图像
 bool mqtt_reconnect();
+void process_image(camera_fb_t *fb, uint8_t **out_buf, size_t *out_len);
 
 // 网络配置
 const char* networks[][2] = {
@@ -61,13 +66,23 @@ const int mqttPort = 1883;
 const int MAX_MQTT_PACKET_SIZE = 10240; // 增加MQTT消息大小限制
 
 // 图像传输配置
-#define IMAGE_QUALITY 30     // JPEG压缩质量 (10-63)，越低质量越差但尺寸越小
-#define FRAME_SIZE FRAMESIZE_QQVGA // 图像尺寸 (QVGA=320x240, QQVGA=160x120)
+#define IMAGE_QUALITY 4     // JPEG压缩质量 (10-63)，越低质量越差但尺寸越小
+#define FRAME_SIZE FRAMESIZE_QVGA // 图像尺寸 (QVGA=320x240, QQVGA=160x120)
 #define MAX_FRAME_RATE 5     // 最大帧率限制
+
+// 图像处理配置
+#define MIN_BRIGHTNESS_THRESHOLD 0  // 将亮度阈值降至0，不进行亮度过滤
+#define MARK_BRIGHTEST_POINT true   // 是否在图像上标记最亮点
+#define RED_MARKER_COLOR 0xFF0000   // 红色标记
+#define MARKER_SIZE 15              // 增大标记大小，使其更容易看到
+#define MARKER_THICKNESS 3          // 增加标记线条粗细
 
 // 全局变量
 unsigned long last_frame_time = 0;
 bool auto_send_image = true;  // 是否自动发送图像
+int brightest_x = -1;  // 最亮点X坐标
+int brightest_y = -1;  // 最亮点Y坐标
+int brightest_val = 0; // 最亮点亮度值
 
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     Serial.printf("收到MQTT消息: 主题=%s, 长度=%d\n", topic, length);
@@ -179,11 +194,11 @@ void setup_camera() {
     config.pin_sscb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 40000000;
-    config.pixel_format = PIXFORMAT_JPEG; // 直接使用JPEG格式
-    config.frame_size = FRAME_SIZE;
-    config.jpeg_quality = IMAGE_QUALITY;
-    config.fb_count = 2; // 使用2个帧缓冲区提高性能
+    config.xclk_freq_hz = 20000000;  // 20MHz
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 10;  // 恢复默认质量
+    config.fb_count = 2;
   
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
@@ -191,36 +206,49 @@ void setup_camera() {
       ESP.restart();
     }
     
-    // 获取传感器对象并设置参数
+    // 获取传感器对象并设置默认参数
     sensor_t * s = esp_camera_sensor_get();
     if (s) {
-        s->set_brightness(s, 0);     // -2 to 2
-        s->set_contrast(s, 0);       // -2 to 2
-        s->set_saturation(s, -1);    // -2 to 2 (降低饱和度有助于检测白色)
-        s->set_special_effect(s, 0); // 0 = no effect
-        s->set_whitebal(s, 1);       // 1 = enable
-        s->set_awb_gain(s, 1);       // 1 = enable
-        s->set_wb_mode(s, 0);        // 0 = auto
-        s->set_exposure_ctrl(s, 1);  // 1 = enable
-        s->set_aec2(s, 0);           // 0 = disable
-        s->set_gain_ctrl(s, 1);      // 1 = enable
-        s->set_agc_gain(s, 0);       // 0 = gain
-        s->set_gainceiling(s, (gainceiling_t)0); // 0 = 2x
-        s->set_bpc(s, 1);            // 1 = enable
-        s->set_wpc(s, 1);            // 1 = enable
-        s->set_raw_gma(s, 1);        // 1 = enable
-        s->set_lenc(s, 1);           // 1 = enable
-        s->set_hmirror(s, 0);        // 0 = disable
-        s->set_vflip(s, 0);          // 0 = disable
-        s->set_dcw(s, 1);            // 1 = enable
+        // 恢复默认设置
+        s->set_brightness(s, 0);     // 亮度: 0
+        s->set_contrast(s, 0);       // 对比度: 0
+        s->set_saturation(s, 0);     // 饱和度: 0
+        s->set_special_effect(s, 0); // 特效: 无
+        s->set_whitebal(s, 1);       // 白平衡: 开启
+        s->set_awb_gain(s, 1);       // 白平衡增益: 开启
+        s->set_exposure_ctrl(s, 1);  // 自动曝光: 开启
+        s->set_aec2(s, 1);          // AEC DSP: 开启
+        s->set_ae_level(s, 0);      // AE Level: 0
+        s->set_aec_value(s, 300);    // 曝光值: 300
+        s->set_gain_ctrl(s, 1);      // 自动增益: 开启
+        s->set_agc_gain(s, 0);       // 增益: 0
+        s->set_gainceiling(s, (gainceiling_t)0); // 增益上限: 2x
+        s->set_bpc(s, 0);           // BPC: 关闭
+        s->set_wpc(s, 0);           // WPC: 关闭
+        s->set_raw_gma(s, 1);       // Raw GMA: 开启
+        s->set_lenc(s, 1);          // 镜头校正: 开启
+        s->set_hmirror(s, 0);       // 水平镜像: 关闭
+        s->set_vflip(s, 0);         // 垂直翻转: 关闭
+        s->set_dcw(s, 1);           // DCW: 开启
+        s->set_colorbar(s, 0);      // 彩条测试: 关闭
         
-        // 优化白色检测的设置
-        s->set_aec_value(s, 200);    // 适中的曝光值，避免过曝
-        s->set_ae_level(s, 0);       // 自动曝光水平
+        Serial.println("摄像头已恢复默认设置");
     }
 }
 
-// 图像处理和发送相关函数 - 使用Base64编码
+// 图像处理函数 - 简化版本，不再处理图像
+void process_image(camera_fb_t *fb, uint8_t **out_buf, size_t *out_len) {
+    // 直接返回原始图像数据
+    *out_buf = fb->buf;
+    *out_len = fb->len;
+    
+    // 重置最亮点信息
+    brightest_x = -1;
+    brightest_y = -1;
+    brightest_val = 0;
+}
+
+// 图像处理和发送相关函数 - 使用TCP直连
 void send_image() {
     // 帧率控制
     unsigned long current_time = millis();
@@ -228,6 +256,12 @@ void send_image() {
         return; // 限制帧率
     }
     last_frame_time = current_time;
+    
+    // 检查TCP客户端连接
+    if (!tcpClient.connected()) {
+        Serial.println("TCP客户端未连接，跳过图像发送");
+        return;
+    }
     
     Serial.println("获取图像...");
     camera_fb_t *fb = esp_camera_fb_get();
@@ -239,46 +273,48 @@ void send_image() {
     Serial.printf("获取图像成功: %dx%d, 格式: %d, 大小: %d字节\n", 
                 fb->width, fb->height, fb->format, fb->len);
     
-    // 创建JSON对象包含图像信息
-    JsonDocument doc;  // 使用JsonDocument替代StaticJsonDocument
-    doc["width"] = fb->width;
-    doc["height"] = fb->height;
-    doc["format"] = fb->format;
-    doc["size"] = fb->len;
+    // 发送图像头信息（固定12字节）
+    uint8_t header[12];
+    header[0] = 0xFF; // 帧起始标记
+    header[1] = 0xAA; // 帧起始标记
+    *((uint16_t*)&header[2]) = fb->width;  // 图像宽度
+    *((uint16_t*)&header[4]) = fb->height; // 图像高度
+    *((uint32_t*)&header[6]) = fb->len;    // 数据长度
+    header[10] = fb->format;  // 图像格式
+    header[11] = 0x55;       // 帧结束标记
     
-    // 将图像数据转换为Base64编码
-    String base64Image = base64::encode(fb->buf, fb->len);
+    // 发送头信息
+    tcpClient.write(header, 12);
+    
+    // 分块发送图像数据
+    const int chunk_size = 4096;
+    uint8_t *data = fb->buf;
+    size_t remaining = fb->len;
+    
+    while (remaining > 0) {
+        size_t chunk = (remaining > chunk_size) ? chunk_size : remaining;
+        size_t sent = tcpClient.write(data, chunk);
+        
+        if (sent == 0) {
+            Serial.println("发送数据失败");
+            break;
+        }
+        
+        data += sent;
+        remaining -= sent;
+    }
+    
+    // 发送帧结束标记
+    uint8_t footer[2] = {0xFF, 0x55};
+    tcpClient.write(footer, 2);
+    
+    // 等待数据发送完成
+    tcpClient.flush();
     
     // 释放图像缓冲区
     esp_camera_fb_return(fb);
     
-    // 发送图像信息
-    String jsonStr;
-    serializeJson(doc, jsonStr);
-    mqttClient.publish("/camera/info", jsonStr.c_str());
-    
-    // 计算需要分割的块数
-    const int max_chunk_size = 4096; // MQTT消息大小限制
-    int num_chunks = (base64Image.length() + max_chunk_size - 1) / max_chunk_size;
-    
-    // 发送图像数据
-    for (int i = 0; i < num_chunks; i++) {
-        int start_pos = i * max_chunk_size;
-        int end_pos = min(start_pos + max_chunk_size, (int)base64Image.length());
-        String chunk = base64Image.substring(start_pos, end_pos);
-        
-        // 创建包含块索引和总块数的主题
-        char chunk_topic[32];
-        sprintf(chunk_topic, "/camera/image/%d/%d", i, num_chunks);
-        
-        // 发送图像块
-        bool success = mqttClient.publish(chunk_topic, chunk.c_str());
-        if (!success) {
-            Serial.printf("发送图像块 %d/%d 失败\n", i+1, num_chunks);
-        }
-    }
-    
-    Serial.printf("图像发送完成，共%d块\n", num_chunks);
+    Serial.println("图像发送完成");
 }
 
 void setup_wifi() {
@@ -328,18 +364,22 @@ void process_command(String cmd) {
         tcpClient.print("PONG\n");
         return;
     }
+    if (cmd == "IMAGE") {
+        send_image();
+        return;
+    }
     if(cmd.startsWith("MOTOR")){
-      int firstComma = cmd.indexOf(',');
-      int secondComma = cmd.indexOf(',', firstComma+1);
-      
-      int left = cmd.substring(firstComma+1, secondComma).toInt();
-      int right = cmd.substring(secondComma+1).toInt();
-      
-      motor_control(0, left);
-      motor_control(1, right);
-      
-      // 回传确认
-      tcpClient.print("ACK,MOTOR," + String(left) + "," + String(right) + "\n");
+        int firstComma = cmd.indexOf(',');
+        int secondComma = cmd.indexOf(',', firstComma+1);
+        
+        int left = cmd.substring(firstComma+1, secondComma).toInt();
+        int right = cmd.substring(secondComma+1).toInt();
+        
+        motor_control(0, left);
+        motor_control(1, right);
+        
+        // 回传确认
+        tcpClient.print("ACK,MOTOR," + String(left) + "," + String(right) + "\n");
     }
 }
 
@@ -366,29 +406,24 @@ void motor_control(uint8_t motor, int speed) {
 }
 
 void send_sensor_data() {
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  
-  JsonDocument doc;  // 使用JsonDocument替代StaticJsonDocument
-  doc["ax"] = ax;
-  doc["ay"] = ay;
-  doc["az"] = az;
-  doc["gx"] = gx;
-  doc["gy"] = gy;
-  doc["gz"] = gz;
-  
-  String jsonStr;
-  serializeJson(doc, jsonStr);
-  
-  mqttClient.publish("/sensor/data", jsonStr.c_str());
-  if(tcpClient.connected()) {
-      tcpClient.println(jsonStr);
-  }
-  
-  // 如果启用了自动发送图像，则发送图像
-  if (auto_send_image) {
-    send_image();
-  }
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    
+    JsonDocument doc;
+    doc["ax"] = ax;
+    doc["ay"] = ay;
+    doc["az"] = az;
+    doc["gx"] = gx;
+    doc["gy"] = gy;
+    doc["gz"] = gz;
+    
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    
+    mqttClient.publish("/sensor/data", jsonStr.c_str());
+    if(tcpClient.connected()) {
+        tcpClient.println(jsonStr);
+    }
 }
 
 void setup() {
@@ -400,7 +435,11 @@ void setup() {
     
     Serial.println("初始化摄像头...");
     setup_camera();
-    Serial.println("摄像头初始化完成");
+    Serial.println("摄像头初始化完成（红外模式）");
+    
+    // 设置红外LED（如果有）
+    pinMode(4, OUTPUT);  // GPIO4通常连接到ESP32-CAM的LED
+    digitalWrite(4, HIGH); // 打开LED以提供红外照明
     
     Serial.println("连接WiFi...");
     setup_wifi();
@@ -424,7 +463,7 @@ void setup() {
     
     // 发送一条测试消息
     if (mqttClient.connected()) {
-      mqttClient.publish("/ESP32_info", "设备启动完成");
+      mqttClient.publish("/ESP32_info", "设备启动完成（红外模式）");
     } else {
       Serial.println("MQTT未连接，尝试重连");
       mqtt_reconnect();

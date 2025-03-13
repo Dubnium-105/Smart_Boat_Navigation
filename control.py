@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, Scale
 import paho.mqtt.client as mqtt
 import json
 import time
@@ -13,12 +13,25 @@ import threading
 import queue
 import numpy as np
 import cv2
+import socket
 
 class MQTTControlApp:
     def __init__(self):
         self.window = tk.Tk()
-        self.window.title("MQTT电机控制器")
-        self.window.geometry("800x600")  # 设置窗口大小
+        self.window.title("电机控制器")
+        self.window.geometry("800x600")
+        
+        # TCP连接配置
+        self.tcp_client = None
+        self.tcp_connected = False
+        self.tcp_host = "192.168.31.179"  # ESP32的IP地址
+        self.tcp_port = 5000
+        
+        # 图像接收相关变量
+        self.image_queue = queue.Queue(maxsize=5)
+        self.image_processing_thread = None
+        self.streaming_enabled = True
+        self.last_image_time = 0
         
         # 添加调试输出区域
         self.create_debug_area()
@@ -34,20 +47,28 @@ class MQTTControlApp:
         self.image_chunks = {}
         self.total_chunks = 0
         self.image_info = {}
-        self.last_image_time = 0
-        self.image_queue = queue.Queue(maxsize=5)  # 图像队列，限制大小为5
         self.image_processing_thread = None
-        self.streaming_enabled = True
         
-        # 最亮点位置
+        # 最亮点位置（从C++端接收）
         self.brightest_x = 160
         self.brightest_y = 120
+        self.brightest_val = 0
         
         # 自动控制相关变量
         self.auto_control = False
         self.last_control_time = 0
         
+        # 电机状态
+        self.motor_a_speed = 0
+        self.motor_b_speed = 0
+        
+        # 亮度过滤阈值
+        self.brightness_threshold = 100
+        
         self.create_widgets()
+        
+        # 启动TCP连接
+        self.connect_tcp()
         
         # 启动图像处理线程
         self.start_image_processing_thread()
@@ -90,6 +111,78 @@ class MQTTControlApp:
             self.debug_print(f"MQTT连接错误: {str(e)}")
             messagebox.showerror("连接错误", f"无法连接到MQTT服务器: {str(e)}")
         
+    def connect_tcp(self):
+        """连接到TCP服务器"""
+        try:
+            self.tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_client.connect((self.tcp_host, self.tcp_port))
+            self.tcp_client.settimeout(1.0)  # 设置超时
+            self.tcp_connected = True
+            self.debug_print("TCP连接成功")
+            
+            # 启动TCP接收线程
+            threading.Thread(target=self.tcp_receive_loop, daemon=True).start()
+            
+        except Exception as e:
+            self.debug_print(f"TCP连接失败: {str(e)}")
+            self.tcp_connected = False
+            
+    def tcp_receive_loop(self):
+        """TCP数据接收循环"""
+        while True:
+            try:
+                if not self.tcp_connected:
+                    time.sleep(1)
+                    continue
+                    
+                # 读取帧头
+                header = self.tcp_client.recv(12)
+                if len(header) < 12:
+                    continue
+                    
+                # 检查帧起始标记
+                if header[0] != 0xFF or header[1] != 0xAA:
+                    continue
+                    
+                # 解析图像信息
+                width = int.from_bytes(header[2:4], byteorder='little')
+                height = int.from_bytes(header[4:6], byteorder='little')
+                data_len = int.from_bytes(header[6:10], byteorder='little')
+                img_format = header[10]
+                
+                # 接收图像数据
+                image_data = bytearray()
+                remaining = data_len
+                
+                while remaining > 0:
+                    chunk = self.tcp_client.recv(min(4096, remaining))
+                    if not chunk:
+                        break
+                    image_data.extend(chunk)
+                    remaining -= len(chunk)
+                
+                # 检查是否接收完整
+                if len(image_data) == data_len:
+                    # 读取帧结束标记
+                    footer = self.tcp_client.recv(2)
+                    if footer[0] == 0xFF and footer[1] == 0x55:
+                        # 将图像数据放入队列
+                        image_info = {
+                            'width': width,
+                            'height': height,
+                            'format': img_format
+                        }
+                        if not self.image_queue.full():
+                            self.image_queue.put((bytes(image_data), image_info))
+                
+            except socket.timeout:
+                continue
+            except Exception as e:
+                self.debug_print(f"TCP接收错误: {str(e)}")
+                self.tcp_connected = False
+                time.sleep(1)
+                self.connect_tcp()
+                
     def create_widgets(self):
         main_frame = ttk.Frame(self.window, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -136,9 +229,27 @@ class MQTTControlApp:
         ttk.Label(control_frame, text="左电机").grid(row=1, column=0)
         ttk.Label(control_frame, text="右电机").grid(row=1, column=1)
         
+        # 电机状态显示
+        self.motor_a_label = ttk.Label(control_frame, text="左电机速度: 0")
+        self.motor_a_label.grid(row=2, column=0, pady=5)
+        self.motor_b_label = ttk.Label(control_frame, text="右电机速度: 0")
+        self.motor_b_label.grid(row=2, column=1, pady=5)
+        
         # 设置列权重，使滑块能够扩展
         control_frame.columnconfigure(0, weight=1)
         control_frame.columnconfigure(1, weight=1)
+        
+        # 亮度阈值控制
+        threshold_frame = ttk.LabelFrame(main_frame, text="亮度阈值设置")
+        threshold_frame.pack(pady=5, fill=tk.X)
+        
+        ttk.Label(threshold_frame, text="最小亮度阈值:").pack(side=tk.LEFT, padx=5)
+        self.threshold_slider = Scale(threshold_frame, from_=0, to=255, orient=tk.HORIZONTAL, 
+                                     command=self.on_threshold_change)
+        self.threshold_slider.set(self.brightness_threshold)
+        self.threshold_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.threshold_value_label = ttk.Label(threshold_frame, text=f"当前值: {self.brightness_threshold}")
+        self.threshold_value_label.pack(side=tk.LEFT, padx=5)
         
         # 自动控制开关
         self.auto_var = tk.BooleanVar()
@@ -180,11 +291,19 @@ class MQTTControlApp:
             # 转换为灰度图
             gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
             
-            # 寻找最亮点
-            (min_val, max_val, min_loc, max_loc) = cv2.minMaxLoc(gray)
+            # 应用亮度阈值过滤
+            _, thresholded = cv2.threshold(gray, self.brightness_threshold, 255, cv2.THRESH_TOZERO)
             
-            # 返回最亮点坐标
+            # 如果所有像素都被过滤掉，返回图像中心
+            if cv2.countNonZero(thresholded) == 0:
+                return image.width // 2, image.height // 2, 0
+            
+            # 寻找最亮点
+            (min_val, max_val, min_loc, max_loc) = cv2.minMaxLoc(thresholded)
+            
+            # 返回最亮点坐标和亮度值
             return max_loc[0], max_loc[1], max_val
+            
         except Exception as e:
             self.debug_print(f"寻找最亮点错误: {str(e)}")
             return image.width // 2, image.height // 2, 0
@@ -206,8 +325,19 @@ class MQTTControlApp:
             # 创建白色掩码
             mask = cv2.inRange(hsv, lower_white, upper_white)
             
+            # 应用亮度阈值过滤
+            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+            _, brightness_mask = cv2.threshold(gray, self.brightness_threshold, 255, cv2.THRESH_BINARY)
+            
+            # 结合白色掩码和亮度掩码
+            combined_mask = cv2.bitwise_and(mask, brightness_mask)
+            
+            # 如果所有像素都被过滤掉，返回图像中心
+            if cv2.countNonZero(combined_mask) == 0:
+                return image.width // 2, image.height // 2, 0
+            
             # 寻找白色区域的轮廓
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if contours:
                 # 找到最大的白色区域
@@ -226,21 +356,48 @@ class MQTTControlApp:
             self.debug_print(f"寻找白色点错误: {str(e)}")
             return image.width // 2, image.height // 2, 0
         
+    def mark_brightest_point(self, image, x, y, brightness):
+        """在图像上标记最亮点"""
+        try:
+            # 转换为OpenCV格式
+            cv_image = np.array(image)
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+            
+            # 标记参数
+            marker_size = 15
+            marker_thickness = 3
+            color = (0, 0, 255)  # 红色
+            
+            # 画圆
+            cv2.circle(cv_image, (x, y), marker_size, color, marker_thickness)
+            
+            # 画十字线
+            cv2.line(cv_image, (x - marker_size, y), (x + marker_size, y), color, marker_thickness)
+            cv2.line(cv_image, (x, y - marker_size), (x, y + marker_size), color, marker_thickness)
+            
+            # 添加亮度值文本
+            cv2.putText(cv_image, f"亮度: {brightness}", (x + 20, y - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # 转换回PIL格式
+            marked_image = Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+            return marked_image
+            
+        except Exception as e:
+            self.debug_print(f"标记最亮点错误: {str(e)}")
+            return image
+        
     def process_image_queue(self):
-        """处理图像队列的线程函数"""
+        """处理图像队列"""
         last_fps_update = time.time()
         frame_count = 0
         
         while True:
             try:
                 # 从队列获取图像数据
-                base64_data, image_info = self.image_queue.get(timeout=1.0)
+                image_data, image_info = self.image_queue.get(timeout=1.0)
                 
-                # 处理图像
                 try:
-                    # 解码Base64数据
-                    image_data = base64.b64decode(base64_data)
-                    
                     # 将图像数据转换为PIL图像
                     image = Image.open(io.BytesIO(image_data))
                     
@@ -249,27 +406,26 @@ class MQTTControlApp:
                     display_height = 480
                     image = image.resize((display_width, display_height), Image.LANCZOS)
                     
-                    # 寻找最亮点/最白点
-                    x, y, val = self.find_whitest_point(image)
+                    # 寻找最亮点
+                    x, y, val = self.find_brightest_point(image)
                     self.brightest_x = x
                     self.brightest_y = y
+                    self.brightest_val = val
                     
-                    # 在图像上标记最亮点
-                    draw = ImageDraw.Draw(image)
-                    r = 10  # 标记半径
-                    draw.ellipse((x-r, y-r, x+r, y+r), outline='red', width=2)
+                    # 标记最亮点
+                    marked_image = self.mark_brightest_point(image, x, y, val)
                     
                     # 转换为Tkinter可显示的格式
-                    photo = ImageTk.PhotoImage(image)
+                    photo = ImageTk.PhotoImage(marked_image)
                     
-                    # 更新显示（使用主线程）
+                    # 更新显示
                     self.window.after(0, self.update_image_display, photo, image_info, x, y, val)
                     
                     # 如果启用了自动控制，控制电机
                     if self.auto_control:
                         self.window.after(0, self.auto_track_light)
                     
-                    # 更新帧率计数
+                    # 更新帧率
                     frame_count += 1
                     current_time = time.time()
                     if current_time - last_fps_update >= 1.0:
@@ -282,13 +438,16 @@ class MQTTControlApp:
                     self.debug_print(f"图像处理错误: {str(e)}")
                     self.debug_print(traceback.format_exc())
                 
-                # 标记任务完成
                 self.image_queue.task_done()
                 
             except queue.Empty:
                 # 队列为空，继续等待
                 pass
                 
+            if self.streaming_enabled and time.time() - self.last_image_time > 0.2:
+                # 每200ms请求一次新图像
+                self.request_image()
+        
     def update_image_display(self, photo, image_info, x, y, val):
         """更新图像显示（在主线程中调用）"""
         self.image_label.configure(image=photo)
@@ -300,7 +459,7 @@ class MQTTControlApp:
         self.image_status.config(text=f"图像已更新: {width}x{height}")
         
         # 更新最亮点位置显示
-        self.brightest_label.config(text=f"最亮点: x={x}, y={y}, 值={val:.1f}")
+        self.brightest_label.config(text=f"最亮点: x={x}, y={y}, 值={val}")
         
         # 更新最后图像时间
         self.last_image_time = time.time()
@@ -310,11 +469,15 @@ class MQTTControlApp:
         self.fps_label.config(text=f"帧率: {fps:.1f} FPS")
         
     def request_image(self):
-        """手动请求图像刷新"""
-        self.debug_print("手动请求图像刷新")
-        self.client.publish("/camera/request", "refresh")
-        self.image_status.config(text="请求图像中...")
-        
+        """请求图像更新"""
+        if self.tcp_connected:
+            try:
+                self.tcp_client.send(b"IMAGE\n")
+                self.debug_print("已发送图像请求")
+            except Exception as e:
+                self.debug_print(f"发送图像请求失败: {str(e)}")
+                self.tcp_connected = False
+                
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.debug_print("已成功连接到MQTT服务器")
@@ -364,8 +527,11 @@ class MQTTControlApp:
             elif msg.topic == "/sensor/data":
                 try:
                     data = json.loads(msg.payload.decode())
-                    # 只在调试区域显示传感器数据，避免刷屏
-                    # self.debug_print(f"传感器数据: {data}")
+                    # 更新最亮点信息（如果有）
+                    if 'brightest_x' in data and 'brightest_y' in data:
+                        self.brightest_x = data['brightest_x']
+                        self.brightest_y = data['brightest_y']
+                        self.brightest_val = data.get('brightest_val', 0)
                 except Exception as e:
                     self.debug_print(f"处理传感器数据错误: {str(e)}")
             
@@ -415,22 +581,39 @@ class MQTTControlApp:
                 
     def on_slider(self, value):
         if not self.auto_control:  # 只在手动模式下响应滑块
+            self.motor_a_speed = int(self.slider_L.get())
+            self.motor_b_speed = int(self.slider_R.get())
+            
             cmd = {
-                "speedA": int(self.slider_L.get()),
-                "speedB": int(self.slider_R.get())
+                "speedA": self.motor_a_speed,
+                "speedB": self.motor_b_speed
             }
             self.client.publish("/motor", json.dumps(cmd))
-            # self.debug_print(f"发送电机控制: A={cmd['speedA']}, B={cmd['speedB']}")
             
+            # 更新电机状态显示
+            self.motor_a_label.config(text=f"左电机速度: {self.motor_a_speed}")
+            self.motor_b_label.config(text=f"右电机速度: {self.motor_b_speed}")
+            
+    def on_threshold_change(self, value):
+        """处理亮度阈值变化"""
+        self.brightness_threshold = int(value)
+        self.threshold_value_label.config(text=f"当前值: {self.brightness_threshold}")
+        
     def toggle_auto_control(self):
         self.auto_control = self.auto_var.get()
         self.debug_print(f"自动控制: {'开启' if self.auto_control else '关闭'}")
         
         if not self.auto_control:
             # 停止电机
+            self.motor_a_speed = 0
+            self.motor_b_speed = 0
             cmd = {"speedA": 0, "speedB": 0}
             self.client.publish("/motor", json.dumps(cmd))
             self.debug_print("停止电机")
+            
+            # 更新电机状态显示
+            self.motor_a_label.config(text=f"左电机速度: {self.motor_a_speed}")
+            self.motor_b_label.config(text=f"右电机速度: {self.motor_b_speed}")
             
     def auto_track_light(self):
         current_time = time.time()
@@ -458,12 +641,20 @@ class MQTTControlApp:
             left_speed = max(-100, min(100, left_speed))
             right_speed = max(-100, min(100, right_speed))
         
+        # 更新电机状态
+        self.motor_a_speed = int(left_speed)
+        self.motor_b_speed = int(right_speed)
+        
         # 发送控制命令
         cmd = {
-            "speedA": int(left_speed),
-            "speedB": int(right_speed)
+            "speedA": self.motor_a_speed,
+            "speedB": self.motor_b_speed
         }
         self.client.publish("/motor", json.dumps(cmd))
+        
+        # 更新电机状态显示
+        self.motor_a_label.config(text=f"左电机速度: {self.motor_a_speed}")
+        self.motor_b_label.config(text=f"右电机速度: {self.motor_b_speed}")
         
         self.last_control_time = current_time
         
