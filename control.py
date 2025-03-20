@@ -14,6 +14,90 @@ import queue
 import numpy as np
 import cv2
 import socket
+from flask import Flask, render_template, Response, send_from_directory
+from flask_socketio import SocketIO
+import logging
+
+# 禁用Flask的默认日志
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+app = Flask(__name__)
+socketio = SocketIO(app)
+
+# 创建必要的目录
+if not os.path.exists('templates'):
+    os.makedirs('templates')
+if not os.path.exists('static'):
+    os.makedirs('static')
+
+# 创建一个基本的favicon.ico
+def create_favicon():
+    img = Image.new('RGB', (16, 16), color='red')
+    img_io = io.BytesIO()
+    img.save(img_io, 'ICO')
+    with open('static/favicon.ico', 'wb') as f:
+        f.write(img_io.getvalue())
+
+create_favicon()
+
+# 创建HTML模板
+html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>摄像头画面</title>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        #videoFeed {
+            max-width: 800px;
+            width: 100%;
+            border: 2px solid #333;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .info {
+            background-color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            margin: 10px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <h1>实时摄像头画面</h1>
+    <img id="videoFeed" src="/video_feed">
+    <div class="info" id="brightnessInfo">最亮点: 等待数据...</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        var socket = io();
+        socket.on('brightness_update', function(data) {
+            document.getElementById('brightnessInfo').innerHTML = 
+                `最亮点: x=${data.x}, y=${data.y}, 亮度=${data.val}`;
+        });
+    </script>
+</body>
+</html>
+"""
+
+# 保存HTML模板
+with open('templates/index.html', 'w', encoding='utf-8') as f:
+    f.write(html_template)
+
+# Flask路由
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory('static', 'favicon.ico')
 
 class MQTTControlApp:
     def __init__(self):
@@ -24,7 +108,7 @@ class MQTTControlApp:
         # TCP连接配置
         self.tcp_client = None
         self.tcp_connected = False
-        self.tcp_host = "192.168.31.179"  # ESP32的IP地址
+        self.tcp_host = "192.168.4.1"  # ESP32的IP地址
         self.tcp_port = 5000
         
         # 图像接收相关变量
@@ -65,6 +149,10 @@ class MQTTControlApp:
         # 亮度过滤阈值
         self.brightness_threshold = 100
         
+        # 添加Web服务器相关变量
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        
         self.create_widgets()
         
         # 启动TCP连接
@@ -75,6 +163,9 @@ class MQTTControlApp:
         
         # 连接MQTT服务器
         self.connect_mqtt()
+        
+        # 启动Web服务器
+        self.start_web_server()
         
     def create_debug_area(self):
         # 创建调试输出区域
@@ -173,6 +264,7 @@ class MQTTControlApp:
                             'format': img_format
                         }
                         if not self.image_queue.full():
+                            # 直接传递字节数据，不需要解码
                             self.image_queue.put((bytes(image_data), image_info))
                 
             except socket.timeout:
@@ -398,6 +490,17 @@ class MQTTControlApp:
                 image_data, image_info = self.image_queue.get(timeout=1.0)
                 
                 try:
+                    # 确保image_data是字节类型
+                    if isinstance(image_data, str):
+                        try:
+                            # 如果是Base64编码的字符串，先解码
+                            image_data = base64.b64decode(image_data)
+                        except Exception as e:
+                            # 如果不是Base64，尝试直接编码为字节
+                            image_data = image_data.encode('latin1')
+                    elif not isinstance(image_data, (bytes, bytearray)):
+                        image_data = bytes(image_data)
+                    
                     # 将图像数据转换为PIL图像
                     image = Image.open(io.BytesIO(image_data))
                     
@@ -437,6 +540,7 @@ class MQTTControlApp:
                 except Exception as e:
                     self.debug_print(f"图像处理错误: {str(e)}")
                     self.debug_print(traceback.format_exc())
+                    self.debug_print(f"图像数据类型: {type(image_data)}")
                 
                 self.image_queue.task_done()
                 
@@ -463,6 +567,20 @@ class MQTTControlApp:
         
         # 更新最后图像时间
         self.last_image_time = time.time()
+        
+        # 更新Web显示用的帧
+        with self.frame_lock:
+            # 将PIL图像转换为字节流
+            img_byte_arr = io.BytesIO()
+            photo._PhotoImage__photo.write(img_byte_arr, format='PNG')
+            self.latest_frame = img_byte_arr.getvalue()
+            
+            # 发送最亮点信息到Web客户端
+            socketio.emit('brightness_update', {
+                'x': x,
+                'y': y,
+                'val': val
+            })
         
     def update_fps_display(self, fps):
         """更新帧率显示（在主线程中调用）"""
@@ -668,7 +786,16 @@ class MQTTControlApp:
         # 每2秒检查一次
         self.window.after(2000, self.check_image_timeout)
         
+    def start_web_server(self):
+        """启动Web服务器"""
+        def run_server():
+            socketio.run(app, host='0.0.0.0', port=8080)
+        
+        threading.Thread(target=run_server, daemon=True).start()
+        self.debug_print("Web服务器已启动，访问 http://localhost:8080 查看画面")
+
     def run(self):
+        """运行应用程序"""
         # 启动图像超时检查
         self.last_image_time = time.time()
         self.window.after(2000, self.check_image_timeout)
@@ -680,6 +807,45 @@ class MQTTControlApp:
         self.client.loop_stop()
         self.client.disconnect()
 
+# Flask路由
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+def get_frame():
+    """生成器函数，用于流式传输图像"""
+    app_instance = None
+    while app_instance is None:
+        # 等待应用程序实例创建
+        for obj in gc.get_objects():
+            if isinstance(obj, MQTTControlApp):
+                app_instance = obj
+                break
+        time.sleep(0.1)
+    
+    while True:
+        with app_instance.frame_lock:
+            if app_instance.latest_frame is not None:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + app_instance.latest_frame + b'\r\n')
+        time.sleep(0.1)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(get_frame(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
 if __name__ == "__main__":
     app = MQTTControlApp()
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+    except Exception as e:
+        print(f"程序异常退出: {str(e)}")
+        traceback.print_exc()
+    finally:
+        # 确保资源被正确清理
+        if hasattr(app, 'client'):
+            app.client.loop_stop()
+            app.client.disconnect()

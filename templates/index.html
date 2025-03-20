@@ -1,0 +1,46 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>摄像头画面</title>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        #videoFeed {
+            max-width: 800px;
+            width: 100%;
+            border: 2px solid #333;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .info {
+            background-color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            margin: 10px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <h1>实时摄像头画面</h1>
+    <img id="videoFeed" src="/video_feed">
+    <div class="info" id="brightnessInfo">最亮点: 等待数据...</div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        var socket = io();
+        socket.on('brightness_update', function(data) {
+            document.getElementById('brightnessInfo').innerHTML = 
+                `最亮点: x=${data.x}, y=${data.y}, 亮度=${data.val}`;
+        });
+    </script>
+</body>
+</html>

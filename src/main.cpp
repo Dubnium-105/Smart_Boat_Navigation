@@ -11,6 +11,7 @@
 #include "fb_gfx.h"
 #include "dl_lib.h"
 #include "esp_http_server.h"
+#include <opencv2/opencv.hpp> // 添加OpenCV库
 
 // 函数前置声明
 void setup_camera();
@@ -238,14 +239,17 @@ void setup_camera() {
 
 // 图像处理函数 - 简化版本，不再处理图像
 void process_image(camera_fb_t *fb, uint8_t **out_buf, size_t *out_len) {
-    // 直接返回原始图像数据
+    cv::Mat img = cv::Mat(fb->height, fb->width, CV_8UC1, fb->buf);
+    cv::Mat gray;
+    cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    cv::Point maxLoc;
+    double maxVal;
+    cv::minMaxLoc(gray, nullptr, &maxVal, nullptr, &maxLoc);
+    brightest_x = maxLoc.x;
+    brightest_y = maxLoc.y;
+    brightest_val = static_cast<int>(maxVal);
     *out_buf = fb->buf;
     *out_len = fb->len;
-    
-    // 重置最亮点信息
-    brightest_x = -1;
-    brightest_y = -1;
-    brightest_val = 0;
 }
 
 // 图像处理和发送相关函数 - 使用TCP直连
