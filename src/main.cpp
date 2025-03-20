@@ -93,7 +93,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     
     // 处理电机控制命令
     if (strcmp(topic, "/motor") == 0) {
-        JsonDocument doc;  // 使用JsonDocument替代StaticJsonDocument
+        DynamicJsonDocument doc(1024);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为1024字节
         DeserializationError error = deserializeJson(doc, payload, length);
         if (error) {
             Serial.print("JSON解析失败: ");
@@ -240,7 +240,7 @@ void send_image() {
                 fb->width, fb->height, fb->format, fb->len);
     
     // 创建JSON对象包含图像信息
-    JsonDocument doc;  // 使用JsonDocument替代StaticJsonDocument
+    DynamicJsonDocument doc(1024);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为1024字节
     doc["width"] = fb->width;
     doc["height"] = fb->height;
     doc["format"] = fb->format;
@@ -369,7 +369,7 @@ void send_sensor_data() {
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
   
-  JsonDocument doc;  // 使用JsonDocument替代StaticJsonDocument
+  DynamicJsonDocument doc(512);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为512字节
   doc["ax"] = ax;
   doc["ay"] = ay;
   doc["az"] = az;
