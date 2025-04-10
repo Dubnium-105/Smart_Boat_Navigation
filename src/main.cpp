@@ -2,7 +2,6 @@
 #include <Wire.h>
 #include <MPU6050.h>
 #include "esp_camera.h"
-#include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <vector>
 #include <base64.h> // 添加Base64编码库
@@ -16,7 +15,7 @@ void motor_control(uint8_t ch, int speed);
 void process_command(String cmd);
 void send_sensor_data();
 void send_image();  // 修改为仅发送图像，不寻找最亮点
-bool mqtt_reconnect();
+void process_image_for_coordinates();
 
 // 网络配置
 const char* networks[][2] = {
@@ -26,7 +25,6 @@ const char* networks[][2] = {
 };
 
 WiFiClient espClient;
-PubSubClient mqttClient(espClient);
 WiFiServer tcpServer(5000);
 WiFiClient tcpClient;
 
@@ -55,107 +53,51 @@ MPU6050 mpu;
 #define HREF_GPIO_NUM     7   // 行同步
 #define PCLK_GPIO_NUM     13  // 像素时钟
 
-// MQTT配置
-const char* mqttServer = "emqx.link2you.top";
-const int mqttPort = 1883;
-const int MAX_MQTT_PACKET_SIZE = 10240; // 增加MQTT消息大小限制
-
 // 图像传输配置
 #define IMAGE_QUALITY 30     // JPEG压缩质量 (10-63)，越低质量越差但尺寸越小
 #define FRAME_SIZE FRAMESIZE_QQVGA // 图像尺寸 (QVGA=320x240, QQVGA=160x120)
 #define MAX_FRAME_RATE 5     // 最大帧率限制
 
+// 坐标传输配置
+const unsigned long COORDINATES_INTERVAL = 100; // 坐标发送最小间隔(毫秒)
+unsigned long last_coordinates_time = 0; // 上次发送坐标的时间
+
 // 全局变量
 unsigned long last_frame_time = 0;
 bool auto_send_image = true;  // 是否自动发送图像
+bool coordinates_only_mode = false;
 
-void mqtt_callback(char* topic, byte* payload, unsigned int length) {
-    Serial.printf("收到MQTT消息: 主题=%s, 长度=%d\n", topic, length);
-    
-    // 处理图像请求
-    if (strcmp(topic, "/camera/request") == 0) {
-        Serial.println("收到图像请求，准备发送图像");
-        send_image();
-        return;
-    }
-    
-    // 处理图像流控制
-    if (strcmp(topic, "/camera/stream") == 0) {
-        if (length > 0 && payload[0] == '1') {
-            auto_send_image = true;
-            Serial.println("开启自动图像流");
-        } else {
-            auto_send_image = false;
-            Serial.println("关闭自动图像流");
-        }
-        return;
-    }
-    
-    // 处理电机控制命令
-    if (strcmp(topic, "/motor") == 0) {
-        DynamicJsonDocument doc(1024);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为1024字节
-        DeserializationError error = deserializeJson(doc, payload, length);
-        if (error) {
-            Serial.print("JSON解析失败: ");
-            Serial.println(error.c_str());
-            return;
-        }
-        
-        Serial.println("处理电机控制命令");
-        
-        // 处理 boot 命令
-        if (doc["boot"].is<const char*>()) {
-            const char* val = doc["boot"];
-            Serial.printf("收到boot命令: %s\n", val);
-            if (strcmp(val, "up") == 0) {
-                motor_control(0, 10);
-                motor_control(1, 10);
-            } else if (strcmp(val, "down") == 0) {
-                motor_control(0, -10);
-                motor_control(1, -10);
-            }
-        }
-        
-        // 处理直接速度设置
-        if (doc.containsKey("speedA") && doc.containsKey("speedB")) {
-            int speedA = doc["speedA"];
-            int speedB = doc["speedB"];
-            Serial.printf("设置电机速度: A=%d, B=%d\n", speedA, speedB);
-            motor_control(0, speedA);
-            motor_control(1, speedB);
-        }
-    }
-}
+// 添加新的全局变量
+#define TCP_IMAGE_PORT 5001
+#define TCP_CONTROL_PORT 5000
+WiFiServer imageTcpServer(TCP_IMAGE_PORT);
+WiFiClient imageTcpClient;
 
-bool mqtt_reconnect() {
-    int attempts = 0;
-    while (!mqttClient.connected() && attempts < 5) {
-        attempts++;
-        Serial.print("尝试MQTT连接...");
-        // 创建随机客户端ID
-        String clientId = "ESP32CAM-";
-        clientId += String(random(0xffff), HEX);
-        
-        if (mqttClient.connect(clientId.c_str())) {
-            Serial.println("已连接到MQTT服务器");
-            // 订阅主题
-            mqttClient.subscribe("/motor");
-            mqttClient.subscribe("/motor_control");
-            mqttClient.subscribe("/camera/request");
-            mqttClient.subscribe("/camera/stream");
-            
-            // 发布状态消息
-            mqttClient.publish("/ESP32_info", "设备已上线");
-            mqttClient.publish("/motor/status", "设备已连接");
-            return true;
-        } else {
-            Serial.print("MQTT连接失败, rc=");
-            Serial.print(mqttClient.state());
-            Serial.println(" 5秒后重试");
-            delay(5000);
-        }
-    }
-    return false;
+// 添加串口状态输出间隔
+#define STATUS_INTERVAL 1000  // 1秒输出一次状态
+unsigned long last_status_time = 0;
+
+// 在全局变量区域添加
+// 最亮点坐标
+int brightest_x = 160;  // 默认值为图像中心
+int brightest_y = 120;
+
+void send_status() {
+    static char buf[200];
+    int len = snprintf(buf, sizeof(buf), 
+        "STATUS\t"
+        "memory:%d\t"
+        "wifi:%s\t"
+        "fps:%.1f\t"
+        "clients:%d\t"
+        "coordinates:%d,%d\n",
+        ESP.getFreeHeap(),
+        WiFi.localIP().toString().c_str(), 
+        1000.0f / (millis() - last_frame_time),
+        (tcpClient.connected() ? 1 : 0) + (imageTcpClient.connected() ? 1 : 0),
+        brightest_x, brightest_y
+    );
+    Serial.write(buf, len);
 }
 
 // 完整的摄像头初始化
@@ -229,56 +171,24 @@ void send_image() {
     }
     last_frame_time = current_time;
     
-    Serial.println("获取图像...");
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
         Serial.println("获取图像失败");
         return;
     }
     
-    Serial.printf("获取图像成功: %dx%d, 格式: %d, 大小: %d字节\n", 
-                fb->width, fb->height, fb->format, fb->len);
-    
-    // 创建JSON对象包含图像信息
-    DynamicJsonDocument doc(1024);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为1024字节
-    doc["width"] = fb->width;
-    doc["height"] = fb->height;
-    doc["format"] = fb->format;
-    doc["size"] = fb->len;
-    
-    // 将图像数据转换为Base64编码
-    String base64Image = base64::encode(fb->buf, fb->len);
+    // 如果TCP客户端已连接，发送图像
+    if (imageTcpClient && imageTcpClient.connected()) {
+        // 发送图像大小信息
+        uint32_t size = fb->len;
+        imageTcpClient.write((uint8_t*)&size, 4);
+        
+        // 发送图像数据
+        imageTcpClient.write(fb->buf, fb->len);
+    }
     
     // 释放图像缓冲区
     esp_camera_fb_return(fb);
-    
-    // 发送图像信息
-    String jsonStr;
-    serializeJson(doc, jsonStr);
-    mqttClient.publish("/camera/info", jsonStr.c_str());
-    
-    // 计算需要分割的块数
-    const int max_chunk_size = 4096; // MQTT消息大小限制
-    int num_chunks = (base64Image.length() + max_chunk_size - 1) / max_chunk_size;
-    
-    // 发送图像数据
-    for (int i = 0; i < num_chunks; i++) {
-        int start_pos = i * max_chunk_size;
-        int end_pos = min(start_pos + max_chunk_size, (int)base64Image.length());
-        String chunk = base64Image.substring(start_pos, end_pos);
-        
-        // 创建包含块索引和总块数的主题
-        char chunk_topic[32];
-        sprintf(chunk_topic, "/camera/image/%d/%d", i, num_chunks);
-        
-        // 发送图像块
-        bool success = mqttClient.publish(chunk_topic, chunk.c_str());
-        if (!success) {
-            Serial.printf("发送图像块 %d/%d 失败\n", i+1, num_chunks);
-        }
-    }
-    
-    Serial.printf("图像发送完成，共%d块\n", num_chunks);
 }
 
 void setup_wifi() {
@@ -307,9 +217,37 @@ void setup_wifi() {
     Serial.println("All networks failed!");
 }
 
+// 修改 MPU6050 初始化相关代码
 void setup_mpu() {
-    Wire.begin(19, 20); // SDA, SCL
+    // 先停止之前的 Wire
+    Wire.end();
+    delay(100);  // 等待总线释放
+    
+    // 重新初始化 Wire，使用正确的引脚
+    if(!Wire.begin(21, 20, 100000)) {  // SDA, SCL, 频率100kHz
+        Serial.println("Wire初始化失败!");
+        return;
+    }
+    
+    delay(100);  // 给MPU6050上电稳定时间
+    
+    // 尝试与MPU6050通信
+    Wire.beginTransmission(0x68);  // MPU6050的I2C地址
+    if(Wire.endTransmission() != 0) {
+        Serial.println("无法检测到MPU6050!");
+        return;
+    }
+    
+    // 初始化MPU6050
     mpu.initialize();
+    
+    // 验证连接
+    if(!mpu.testConnection()) {
+        Serial.println("MPU6050连接测试失败!");
+        return;
+    }
+    
+    Serial.println("MPU6050初始化成功!");
 }
 
 void setup_motors() {
@@ -365,30 +303,133 @@ void motor_control(uint8_t motor, int speed) {
   }
 }
 
+void process_image_for_coordinates() {
+  // 检查时间间隔
+  unsigned long current_time = millis();
+  if (current_time - last_coordinates_time < COORDINATES_INTERVAL) {
+    return;
+  }
+  last_coordinates_time = current_time;
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    return;
+  }
+
+  // 使用更精确的坐标计算
+  uint8_t *buf = fb->buf;
+  size_t len = fb->len;
+  int width = fb->width;
+  int height = fb->height;
+  int maxBrightness = 0;
+  int maxX = width / 2;
+  int maxY = height / 2;
+  
+  if (fb->format == PIXFORMAT_JPEG) {
+    // 将JPEG转换为RGB565格式进行处理
+    uint8_t * rgb_buf = (uint8_t *)malloc(width * height * 3);
+    if (!rgb_buf) {
+      Serial.println("内存分配失败");
+      esp_camera_fb_return(fb);
+      return;
+    }
+
+    if (fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgb_buf) == true) {
+      // 遍历RGB数据寻找最亮点
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          int idx = (y * width + x) * 3;
+          // 计算亮度：使用RGB加权平均
+          int brightness = (rgb_buf[idx] * 30 + rgb_buf[idx + 1] * 59 + rgb_buf[idx + 2] * 11) / 100;
+          if (brightness > maxBrightness) {
+            maxBrightness = brightness;
+            maxX = x;
+            maxY = y;
+          }
+        }
+      }
+      // 更新全局变量
+      brightest_x = maxX;
+      brightest_y = maxY;
+    }
+    free(rgb_buf);
+  }
+
+  // 创建JSON对象存储坐标和亮度信息
+  StaticJsonDocument<200> doc;
+  doc["x"] = maxX;
+  doc["y"] = maxY;
+  doc["brightness"] = maxBrightness;
+  doc["width"] = width;
+  doc["height"] = height;
+  doc["timestamp"] = millis();
+  
+  char buffer[200];
+  serializeJson(doc, buffer);
+  
+  // 通过TCP发送坐标数据
+  if (tcpClient.connected()) {
+      tcpClient.println(buffer);
+  }
+  
+  // 通过串口发送坐标数据
+  Serial.printf("发送坐标：x=%d, y=%d, 亮度=%d\n", maxX, maxY, maxBrightness);
+  
+  esp_camera_fb_return(fb);
+}
+
+// 修改传感器数据读取函数，增加错误检查
 void send_sensor_data() {
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  
-  DynamicJsonDocument doc(512);  // 使用DynamicJsonDocument替代JsonDocument，指定容量为512字节
-  doc["ax"] = ax;
-  doc["ay"] = ay;
-  doc["az"] = az;
-  doc["gx"] = gx;
-  doc["gy"] = gy;
-  doc["gz"] = gz;
-  
-  String jsonStr;
-  serializeJson(doc, jsonStr);
-  
-  mqttClient.publish("/sensor/data", jsonStr.c_str());
-  if(tcpClient.connected()) {
-      tcpClient.println(jsonStr);
-  }
-  
-  // 如果启用了自动发送图像，则发送图像
-  if (auto_send_image) {
-    send_image();
-  }
+    static unsigned long last_mpu_error = 0;
+    int16_t ax, ay, az, gx, gy, gz;
+    
+    // 如果最近发生过错误，延迟重试
+    if(millis() - last_mpu_error < 1000) {
+        return;
+    }
+    
+    // 尝试读取MPU6050数据
+    Wire.beginTransmission(0x68);
+    if(Wire.endTransmission() != 0) {
+        Serial.println("MPU6050通信错误!");
+        last_mpu_error = millis();
+        return;
+    }
+    
+    try {
+        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    } catch(...) {
+        Serial.println("读取MPU6050数据失败!");
+        last_mpu_error = millis();
+        return;
+    }
+    
+    // 其余代码保持不变
+    DynamicJsonDocument doc(512);
+    doc["ax"] = ax;
+    doc["ay"] = ay;
+    doc["az"] = az;
+    doc["gx"] = gx;
+    doc["gy"] = gy;
+    doc["gz"] = gz;
+    
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    
+    if(tcpClient.connected()) {
+        tcpClient.println(jsonStr);
+    }
+    
+    // 如果启用了自动发送图像，则发送图像
+    if (auto_send_image) {
+        send_image();
+    }
+    
+    // 如果启用了坐标模式，在这里获取并添加最亮点信息
+    if (coordinates_only_mode) {
+        process_image_for_coordinates();
+    }
 }
 
 void setup() {
@@ -406,29 +447,40 @@ void setup() {
     setup_wifi();
     
     Serial.println("初始化MPU...");
-    setup_mpu();
+    setup_mpu();  // 现在可以启用这行
     
     Serial.println("初始化电机...");
-    setup_motors();
-    
-    // 初始化MQTT
-    Serial.println("配置MQTT...");
-    mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE); // 增加MQTT缓冲区大小
-    mqttClient.setServer(mqttServer, mqttPort);
-    mqttClient.setCallback(mqtt_callback);
+    //setup_motors();
     
     Serial.println("启动TCP服务器...");
     tcpServer.begin();
     
-    Serial.println("设置完成，开始运行");
+    Serial.println("启动TCP图像服务器...");
+    imageTcpServer.begin();
     
-    // 发送一条测试消息
-    if (mqttClient.connected()) {
-      mqttClient.publish("/ESP32_info", "设备启动完成");
-    } else {
-      Serial.println("MQTT未连接，尝试重连");
-      mqtt_reconnect();
+    Serial.println("设置完成，开始运行");
+}
+
+// 添加TCP图像发送函数
+void send_image_tcp() {
+    if (!imageTcpClient || !imageTcpClient.connected()) {
+        return;
     }
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("获取图像失败");
+        return;
+    }
+
+    // 发送图像大小信息
+    uint32_t size = fb->len;
+    imageTcpClient.write((uint8_t*)&size, 4);
+    
+    // 发送图像数据
+    imageTcpClient.write(fb->buf, fb->len);
+    
+    esp_camera_fb_return(fb);
 }
 
 void loop() {
@@ -441,20 +493,6 @@ void loop() {
       Serial.println("WiFi连接断开，尝试重连");
       setup_wifi();
       return;
-    }
-    
-    // 处理MQTT连接
-    if (!mqttClient.connected()) {
-      if (now - lastReconnectAttempt > 5000) {
-        lastReconnectAttempt = now;
-        Serial.println("MQTT连接断开，尝试重连");
-        if (mqtt_reconnect()) {
-          lastReconnectAttempt = 0;
-        }
-      }
-    } else {
-      // MQTT连接正常，处理消息
-      mqttClient.loop();
     }
     
     // 处理TCP客户端
@@ -483,9 +521,34 @@ void loop() {
       }
     }
     
+    // 处理TCP图像客户端连接
+    if (!imageTcpClient || !imageTcpClient.connected()) {
+        imageTcpClient = imageTcpServer.available();
+        if (imageTcpClient) {
+            Serial.println("新的TCP图像客户端已连接");
+            imageTcpClient.setTimeout(1);
+        }
+    }
+    
+    // 如果TCP图像客户端已连接，发送图像
+    if (imageTcpClient && imageTcpClient.connected()) {
+        static unsigned long lastImageTime = 0;
+        unsigned long now = millis();
+        if (now - lastImageTime > 100) { // 10fps
+            lastImageTime = now;
+            send_image_tcp();
+        }
+    }
+    
     // 定期发送传感器数据
     if (now - lastMsg > 100) {  // 减少间隔到100毫秒，提高响应速度
       lastMsg = now;
       send_sensor_data();
+    }
+    
+    // 定期发送状态
+    if (now - last_status_time > STATUS_INTERVAL) {
+        last_status_time = now;
+        send_status();
     }
 }
