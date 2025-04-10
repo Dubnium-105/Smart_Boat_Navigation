@@ -1,6 +1,4 @@
 #include <WiFi.h>
-#include <Wire.h>
-#include <MPU6050.h>
 #include "esp_camera.h"
 #include <ArduinoJson.h>
 #include <vector>
@@ -10,7 +8,6 @@
 // 函数前置声明
 void setup_camera();
 void setup_wifi();
-void setup_mpu();
 void motor_control(uint8_t ch, int speed);
 void process_command(String cmd);
 void send_sensor_data();
@@ -33,7 +30,6 @@ WiFiClient tcpClient;
 #define MOTOR_A_IN2 39
 #define MOTOR_B_IN3 40
 #define MOTOR_B_IN4 41
-MPU6050 mpu;
 
 // 摄像头配置
 #define PWDN_GPIO_NUM     -1  // 无电源控制引脚
@@ -81,6 +77,82 @@ unsigned long last_status_time = 0;
 // 最亮点坐标
 int brightest_x = 160;  // 默认值为图像中心
 int brightest_y = 120;
+
+// 定义通信协议
+#define CMD_PING "PING"
+#define CMD_MOTOR "MOTOR"
+#define CMD_IMAGE "IMAGE"
+#define CMD_STATUS "STATUS"
+
+// 通信状态
+struct CommStatus {
+    bool wifi_connected;
+    bool tcp_control_connected;
+    bool tcp_image_connected;
+    uint32_t last_heartbeat;
+    uint32_t frame_count;
+} comm_status;
+
+// 设备状态
+struct DeviceStatus {
+    int brightest_x;
+    int brightest_y;
+    int brightness;
+    uint32_t free_heap;
+    float fps;
+} device_status = {160, 120, 0, 0, 0};
+
+// 初始化通信状态
+void init_communication() {
+    comm_status = {false, false, false, 0, 0};
+    tcpServer.begin();
+    imageTcpServer.begin();
+    Serial.printf("TCP服务器启动在端口 %d (控制) 和 %d (图像)\n", 
+                 TCP_CONTROL_PORT, TCP_IMAGE_PORT);
+}
+
+// 更新和发送状态
+void update_status() {
+    device_status.free_heap = ESP.getFreeHeap();
+    device_status.fps = 1000.0f / (millis() - last_frame_time);
+    
+    StaticJsonDocument<200> doc;
+    doc["heap"] = device_status.free_heap;
+    doc["fps"] = device_status.fps;
+    doc["x"] = device_status.brightest_x;
+    doc["y"] = device_status.brightest_y;
+    doc["clients"] = (tcpClient.connected() ? 1 : 0) + 
+                    (imageTcpClient.connected() ? 1 : 0);
+    
+    String status;
+    serializeJson(doc, status);
+    if(tcpClient.connected()) {
+        tcpClient.println(CMD_STATUS + String(" ") + status);
+    }
+}
+
+// 处理图像发送
+void handle_image_transmission() {
+    if (!imageTcpClient.connected()) return;
+    
+    static uint32_t last_image_time = 0;
+    uint32_t now = millis();
+    if (now - last_image_time < 100) return; // 限制10fps
+    
+    last_image_time = now;
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) return;
+    
+    uint32_t size = fb->len;
+    imageTcpClient.write((uint8_t*)&size, 4);
+    size_t sent = imageTcpClient.write(fb->buf, fb->len);
+    
+    if (sent == fb->len) {
+        comm_status.frame_count++;
+    }
+    
+    esp_camera_fb_return(fb);
+}
 
 void send_status() {
     static char buf[200];
@@ -210,44 +282,13 @@ void setup_wifi() {
           Serial.printf("\nConnected to %s\n", ssid);
           Serial.print("IP: ");
           Serial.println(WiFi.localIP());
+          comm_status.wifi_connected = true;
           return;
         }
         Serial.println("\nFailed");
     }
     Serial.println("All networks failed!");
-}
-
-// 修改 MPU6050 初始化相关代码
-void setup_mpu() {
-    // 先停止之前的 Wire
-    Wire.end();
-    delay(100);  // 等待总线释放
-    
-    // 重新初始化 Wire，使用正确的引脚
-    if(!Wire.begin(21, 20, 100000)) {  // SDA, SCL, 频率100kHz
-        Serial.println("Wire初始化失败!");
-        return;
-    }
-    
-    delay(100);  // 给MPU6050上电稳定时间
-    
-    // 尝试与MPU6050通信
-    Wire.beginTransmission(0x68);  // MPU6050的I2C地址
-    if(Wire.endTransmission() != 0) {
-        Serial.println("无法检测到MPU6050!");
-        return;
-    }
-    
-    // 初始化MPU6050
-    mpu.initialize();
-    
-    // 验证连接
-    if(!mpu.testConnection()) {
-        Serial.println("MPU6050连接测试失败!");
-        return;
-    }
-    
-    Serial.println("MPU6050初始化成功!");
+    comm_status.wifi_connected = false;
 }
 
 void setup_motors() {
@@ -379,40 +420,15 @@ void process_image_for_coordinates() {
   esp_camera_fb_return(fb);
 }
 
-// 修改传感器数据读取函数，增加错误检查
 void send_sensor_data() {
-    static unsigned long last_mpu_error = 0;
-    int16_t ax, ay, az, gx, gy, gz;
-    
-    // 如果最近发生过错误，延迟重试
-    if(millis() - last_mpu_error < 1000) {
-        return;
-    }
-    
-    // 尝试读取MPU6050数据
-    Wire.beginTransmission(0x68);
-    if(Wire.endTransmission() != 0) {
-        Serial.println("MPU6050通信错误!");
-        last_mpu_error = millis();
-        return;
-    }
-    
-    try {
-        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    } catch(...) {
-        Serial.println("读取MPU6050数据失败!");
-        last_mpu_error = millis();
-        return;
-    }
-    
     // 其余代码保持不变
     DynamicJsonDocument doc(512);
-    doc["ax"] = ax;
-    doc["ay"] = ay;
-    doc["az"] = az;
-    doc["gx"] = gx;
-    doc["gy"] = gy;
-    doc["gz"] = gz;
+    doc["ax"] = 0;
+    doc["ay"] = 0;
+    doc["az"] = 0;
+    doc["gx"] = 0;
+    doc["gy"] = 0;
+    doc["gz"] = 0;
     
     String jsonStr;
     serializeJson(doc, jsonStr);
@@ -445,20 +461,22 @@ void setup() {
     
     Serial.println("连接WiFi...");
     setup_wifi();
-    
-    Serial.println("初始化MPU...");
-    setup_mpu();  // 现在可以启用这行
-    
-    Serial.println("初始化电机...");
-    //setup_motors();
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("WiFi 已连接，IP 地址: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        Serial.println("WiFi 连接失败，请检查网络配置。");
+    }
     
     Serial.println("启动TCP服务器...");
     tcpServer.begin();
+    Serial.println("控制端口 5000 已启动");
     
     Serial.println("启动TCP图像服务器...");
     imageTcpServer.begin();
+    Serial.println("图像端口 5001 已启动");
     
     Serial.println("设置完成，开始运行");
+    init_communication();
 }
 
 // 添加TCP图像发送函数
@@ -550,5 +568,12 @@ void loop() {
     if (now - last_status_time > STATUS_INTERVAL) {
         last_status_time = now;
         send_status();
+    }
+    
+    // 更新状态
+    static uint32_t last_status_time = 0;
+    if (millis() - last_status_time > STATUS_INTERVAL) {
+        update_status();
+        last_status_time = millis();
     }
 }
