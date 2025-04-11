@@ -39,6 +39,7 @@ Adafruit_MCP23X17 mcp;
 #define MPU_SCL 20   // MPU6050的SCL引脚
 #define MCP_SDA 21   // MCP23017的SDA引脚
 #define MCP_SCL 47   // MCP23017的SCL引脚
+#define MCP_ADDR 0x20  // MCP23017的I2C地址，默认为0x20
 
 // 创建第二个I2C实例（Wire1）
 TwoWire mcpWire = TwoWire(1);  // 使用I2C端口1
@@ -165,24 +166,38 @@ void setup_wifi() {
         const char* pass = networks[i][1];
         
         WiFi.begin(ssid, pass);
-        Serial.printf("Trying %s...", ssid);
+        Serial.printf("连接 %s...", ssid);
         
         int retries = 0;
         while(WiFi.status() != WL_CONNECTED && retries < 15){
-          delay(1000);
+          delay(50);
           Serial.print(".");
           retries++;
         }
         
         if(WiFi.status() == WL_CONNECTED){
+          Serial.println("====================================");
           Serial.printf("\nConnected to %s\n", ssid);
+          Serial.print("RSSI: ");
+          Serial.println(WiFi.RSSI());
+          Serial.print("MAC: ");
+          Serial.println(WiFi.macAddress());
+          Serial.print("Gateway: ");
+          Serial.print(WiFi.gatewayIP());
+          Serial.print("Subnet: ");
+          Serial.println(WiFi.subnetMask());
+          Serial.print("DNS: ");
+          Serial.println(WiFi.dnsIP());
+          Serial.print("Hostname: ");
+          Serial.println(WiFi.getHostname());
           Serial.print("IP: ");
           Serial.println(WiFi.localIP());
-          return;
+          Serial.println("===================================="); 
+            return;
         }
-        Serial.println("\nFailed");
+        Serial.println("连接失败");
     }
-    Serial.println("All networks failed!");
+    Serial.println("全部尝试失败!");
 }
 
 void setup_mpu() {
@@ -296,7 +311,8 @@ void setup() {
 }
 
 void loop() {
-    static unsigned long lastMsg = 0;
+    static unsigned long lastMqttReconnect = 0;
+    static unsigned long lastSensorDataSend = 0;
     unsigned long now = millis();
     
     if (WiFi.status() != WL_CONNECTED) {
@@ -306,16 +322,16 @@ void loop() {
     }
     
     if (!mqttClient.connected()) {
-      if (now - lastMsg > 5000) {
-        lastMsg = now;
+      if (now - lastMqttReconnect > 5000) {
+        lastMqttReconnect = now;
         mqtt_reconnect();
       }
     } else {
       mqttClient.loop();
     }
     
-    if (now - lastMsg > 100) {
-      lastMsg = now;
+    if (now - lastSensorDataSend > 100) {
+      lastSensorDataSend = now;
       process_ir_data();
       send_sensor_data();
     }
