@@ -1,18 +1,13 @@
 /**
- * ESP32 摄像头 - 简化版
+ * ESP32-S3摄像头最亮点检测 - 高性能优化版
  * 
  * 配置说明:
  * - 摄像头: ESP32S3_EYE
  * - 输出格式: 灰度图 (GRAYSCALE)
  * - 分辨率: QVGA (320x240)
- * - 时钟频率: 20MHz
- * - 自动增益功能已开启
- * - 简化视频流服务，直接输出到IP
- * 
- * 功能:
- * - 简化的WiFi摄像头流媒体服务
- * - 启动后立即提供视频流
- * - 通过http://摄像头IP/访问视频流
+ * - 时钟频率: 10MHz
+ * - 内存优化设计，防止栈溢出
+ * - 两核心独立任务
  */
 #include "esp_camera.h"
 #include <WiFi.h>
@@ -21,32 +16,22 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_camera_pins.h"  // 包含摄像头引脚定义
 
-// 选择摄像头型号
-#define CAMERA_MODEL_ESP32S3_EYE // Has PSRAM
-#define PWDN_GPIO_NUM  -1
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM  15
-#define SIOD_GPIO_NUM  4
-#define SIOC_GPIO_NUM  5
+// 多任务相关
+TaskHandle_t serialMonitorTaskHandle = NULL;
+SemaphoreHandle_t frameAccessMutex = NULL;
 
-#define Y2_GPIO_NUM 11
-#define Y3_GPIO_NUM 9
-#define Y4_GPIO_NUM 8
-#define Y5_GPIO_NUM 10
-#define Y6_GPIO_NUM 12
-#define Y7_GPIO_NUM 18
-#define Y8_GPIO_NUM 17
-#define Y9_GPIO_NUM 16
-
-#define VSYNC_GPIO_NUM 6
-#define HREF_GPIO_NUM  7
-#define PCLK_GPIO_NUM  13
+// 共享数据
+volatile int sharedBrightX = 0;
+volatile int sharedBrightY = 0;
+volatile bool newBrightPointAvailable = false;
+volatile bool systemIsBusy = false;      // 系统繁忙标志
 
 // 固定IP设置
 #define USE_FIXED_IP true
 IPAddress staticIP(192, 168, 31, 170);  // 固定IP地址
-IPAddress gateway(192, 168, 31, 1);     // 网关，根据您的路由器设置调整
+IPAddress gateway(192, 168, 31, 1);     // 网关
 IPAddress subnet(255, 255, 255, 0);     // 子网掩码
 IPAddress dns(8, 8, 8, 8);              // DNS服务器
 
@@ -72,9 +57,6 @@ extern unsigned long lastFPSCalculationTime;
 extern void find_brightest(const uint8_t* gray, int width, int height, int& out_x, int& out_y);
 extern void print_ascii_frame(int width, int height, int bx, int by);
 
-// 函数声明
-void setupLedFlash(int pin);
-
 /**
  * 打印当前相机配置信息
  */
@@ -87,24 +69,13 @@ void printCameraSettings() {
     case FRAMESIZE_QQVGA: Serial.println("当前分辨率: 160x120 (QQVGA)"); break;
     case FRAMESIZE_QVGA: Serial.println("当前分辨率: 320x240 (QVGA)"); break;
     case FRAMESIZE_VGA: Serial.println("当前分辨率: 640x480 (VGA)"); break;
-    case FRAMESIZE_SVGA: Serial.println("当前分辨率: 800x600 (SVGA)"); break;
-    case FRAMESIZE_XGA: Serial.println("当前分辨率: 1024x768 (XGA)"); break;
-    case FRAMESIZE_SXGA: Serial.println("当前分辨率: 1280x1024 (SXGA)"); break;
-    case FRAMESIZE_UXGA: Serial.println("当前分辨率: 1600x1200 (UXGA)"); break;
-    case FRAMESIZE_QXGA: Serial.println("当前分辨率: 2048x1536 (QXGA)"); break;
-    case FRAMESIZE_HQVGA: Serial.println("当前分辨率: 240x176 (HQVGA)"); break;
-    case FRAMESIZE_HD: Serial.println("当前分辨率: 1280x720 (HD)"); break;
-    case FRAMESIZE_FHD: Serial.println("当前分辨率: 1920x1080 (FHD)"); break;
-    case FRAMESIZE_QHD: Serial.println("当前分辨率: 2560x1440 (QHD)"); break;
-    case FRAMESIZE_QSXGA: Serial.println("当前分辨率: 2560x1920 (QSXGA)"); break;
-    default: Serial.printf("当前分辨率: 未知 (%d)\n", s->status.framesize);
+    default: Serial.printf("当前分辨率: 其他 (%d)\n", s->status.framesize);
   }
   
   Serial.printf("JPEG品质: %d\n", s->status.quality);
   Serial.printf("亮度: %d\n", s->status.brightness);
   Serial.printf("对比度: %d\n", s->status.contrast);
   Serial.printf("饱和度: %d\n", s->status.saturation);
-  Serial.printf("特殊效果: %d\n", s->status.special_effect);
   Serial.printf("垂直翻转: %s\n", s->status.vflip ? "是" : "否");
   Serial.printf("水平镜像: %s\n", s->status.hmirror ? "是" : "否");
   Serial.printf("自动白平衡: %s\n", s->status.awb ? "开启" : "关闭");
@@ -113,61 +84,105 @@ void printCameraSettings() {
   Serial.println("=====================");
 }
 
-/**
- * 诊断摄像头性能状态
- */
-void diagnoseCameraPerformance() {
-  Serial.println("\n===== 摄像头性能诊断 =====");
-  
-  // 1. 内存使用情况
-  Serial.printf("可用HEAP内存: %d字节\n", esp_get_free_heap_size());
-  
-  // 如果有PSRAM，检查PSRAM使用情况
-  if(psramFound()) {
-    Serial.printf("可用PSRAM内存: %d字节\n", ESP.getFreePsram());
-    Serial.printf("PSRAM总大小: %d字节\n", ESP.getPsramSize());
-    Serial.printf("PSRAM使用率: %.1f%%\n", 100.0f * (ESP.getPsramSize() - ESP.getFreePsram()) / ESP.getPsramSize());
+// 低优先级串口监控任务函数 - 分配到核心0，降低与视频流的冲突
+void serialMonitorTask(void *parameter) {
+  unsigned long lastDiagTime = 0;
+  unsigned long lastBrightTime = 0;
+  const int BRIGHT_REFRESH_INTERVAL = 800;  // 增加刷新间隔到800ms，减少串口负担
+
+  while (true) {
+    unsigned long currentTime = millis();
+
+    // 每10秒输出一次诊断信息
+    if (currentTime - lastDiagTime >= 10000) {
+      // 检查是否系统繁忙，如果繁忙则跳过此次诊断
+      if (!systemIsBusy) {
+        Serial.printf("摄像头运行中，当前帧率: %.2f FPS\n", currentFPS);
+        Serial.printf("当前IP: %s\n", WiFi.localIP().toString().c_str());
+      }
+      lastDiagTime = currentTime;
+    }
+
+    // 定期输出最亮点信息，间隔增大
+    if (currentTime - lastBrightTime >= BRIGHT_REFRESH_INTERVAL) {
+      // 只在系统不繁忙时尝试获取互斥锁
+      if (!systemIsBusy && xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (newBrightPointAvailable) {
+          // 安全复制共享数据以减少锁持有时间
+          int local_x = sharedBrightX;
+          int local_y = sharedBrightY;
+          newBrightPointAvailable = false;
+          xSemaphoreGive(frameAccessMutex);
+          
+          // 锁外处理数据，减少锁竞争
+          Serial.printf("[最亮点] x=%d, y=%d\n", local_x, local_y);
+          print_ascii_frame(24, 12, local_x * 24 / 320, local_y * 12 / 240);  // 使用更小的显示尺寸
+        } else {
+          xSemaphoreGive(frameAccessMutex);
+        }
+      }
+      lastBrightTime = currentTime;
+    }
+
+    // 更长的延时，减轻CPU负担
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
+}
+
+// 在每个帧处理时手动调用的函数
+void processFrame(camera_fb_t *fb) {
+  static uint32_t last_frame_time = 0;
+  uint32_t now = millis();
   
-  // 2. CPU负载
-  UBaseType_t stackHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-  Serial.printf("当前任务剩余堆栈: %d字节\n", stackHighWaterMark * 4); // 4字节为单位
-  
-  // 3. 网络状态
-  Serial.printf("WiFi信号强度(RSSI): %d dBm\n", WiFi.RSSI());
-  Serial.printf("当前WiFi通道: %d\n", WiFi.channel());
-  Serial.printf("网络MTU: %d字节\n", WiFi.getTxPower());
-  
-  // 4. 帧率测量
-  unsigned long currentTime = millis();
-  // 每秒更新一次FPS计算
-  if (currentTime - lastFPSCalculationTime >= 1000) {
-    currentFPS = frameCount * 1000.0 / (currentTime - lastFPSCalculationTime);
-    frameCount = 0;
-    lastFPSCalculationTime = currentTime;
-  }
-  Serial.printf("当前帧率: %.2f FPS\n", currentFPS);
-  
-  // 5. 摄像头参数测试
-  sensor_t *s = esp_camera_sensor_get();
-  if (s) {
-    framesize_t currentSize = s->status.framesize;
-    int quality = s->status.quality;
-    Serial.printf("帧大小: %d，品质: %d\n", currentSize, quality);
+  // 降低处理频率，间隔增大到200ms
+  if (now - last_frame_time > 200) {
+    last_frame_time = now;
     
-    int clockSpeed = ESP.getCpuFreqMHz();
-    Serial.printf("CPU时钟频率: %d MHz\n", clockSpeed);
+    // 尝试获取互斥锁，超时时间短以避免阻塞视频流
+    if (xSemaphoreTake(frameAccessMutex, 10) == pdTRUE) {
+      if (fb && fb->format == PIXFORMAT_GRAYSCALE) {
+        int bx, by;
+        find_brightest(fb->buf, fb->width, fb->height, bx, by);
+        
+        // 更新共享变量
+        sharedBrightX = bx;
+        sharedBrightY = by;
+        newBrightPointAvailable = true;
+      }
+      xSemaphoreGive(frameAccessMutex);
+    }
   }
-  Serial.println("============================");
-  
-  // 增加帧计数
-  frameCount++;
+}
+
+// 系统健康监视任务 - 监控堆栈和内存
+void systemMonitorTask(void* parameter) {
+  while(true) {
+    // 检查堆栈水位
+    UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
+    
+    // 如果堆栈剩余空间小于阈值，标记系统繁忙
+    systemIsBusy = (uxHighWaterMark < 1024);  // 1KB阈值
+    
+    // 如果堆栈非常低，则打印警告
+    if (uxHighWaterMark < 512) {
+      Serial.printf("警告: 堆栈空间低: %d字节\n", uxHighWaterMark * 4);
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(2000));  // 每2秒检查一次
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println();
+
+  // 创建互斥锁以保护帧访问
+  frameAccessMutex = xSemaphoreCreateMutex();
+  if (frameAccessMutex == NULL) {
+    Serial.println("错误: 无法创建互斥锁!");
+    ESP.restart();
+  }
 
   // 配置摄像头参数
   camera_config_t config;
@@ -189,81 +204,74 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;  // 20MHz时钟频率
-  config.frame_size = FRAMESIZE_QVGA;  // QVGA分辨率(320x240)
-  config.pixel_format = PIXFORMAT_GRAYSCALE;  // 改为灰度图格式
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.xclk_freq_hz = 10000000;  // 10MHz时钟频率
+  config.frame_size = FRAMESIZE_QVGA;  // 320x240
+  config.pixel_format = PIXFORMAT_GRAYSCALE;  // 灰度图格式
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // 更改为WHEN_EMPTY，更稳定
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 20;
-  config.fb_count = 2;  // 增加帧缓冲数量以提高流畅度
+  config.jpeg_quality = 12;  // 降低一点质量以减轻处理负担
+  config.fb_count = 1;  // 单一帧缓冲，避免PSRAM过载
 
-  // PSRAM处理
+  // PSRAM检测及配置
   if (psramFound()) {
-    config.jpeg_quality = 15;
-    config.fb_count = 3;
-    config.grab_mode = CAMERA_GRAB_LATEST;
+    Serial.println("找到PSRAM，启用相关功能");
   } else {
-    config.frame_size = FRAMESIZE_SVGA;
+    Serial.println("未找到PSRAM，将使用有限的功能");
+    config.frame_size = FRAMESIZE_QVGA;
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
-
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
 
   // 初始化摄像头
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+    Serial.printf("摄像头初始化失败，错误代码: 0x%x\n", err);
+    ESP.restart();
+    return;
+  }
+  Serial.println("摄像头初始化成功");
+
+  // 获取并配置摄像头传感器
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) {
+    Serial.println("获取传感器失败!");
     return;
   }
 
-  sensor_t *s = esp_camera_sensor_get();
-
-  // OV3660传感器特殊配置
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);
-    s->set_brightness(s, 1);
-    s->set_saturation(s, -2);
-  }
-
-#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
-#endif
-
-#if defined(CAMERA_MODEL_ESP32S3_EYE)
-  s->set_vflip(s, 1);
-#endif
-
-  // 恢复摄像头默认增益设置，开启自动增益控制、自动曝光和自动白平衡
-  s->set_gain_ctrl(s, 0);       // 开启自动增益
-  s->set_exposure_ctrl(s, 0);   // 开启自动曝光
-  s->set_agc_gain(s, 0);        // 设置自动增益
-  s->set_awb_gain(s, 0);        // 开启自动白平衡增益
-  s->set_aec_value(s, 100);     // 设置固定曝光值
-  s->set_ae_level(s, 0);        // 设置AE级别为0
-  s->set_whitebal(s, 1);        // 开启白平衡
-
+  // 摄像头参数优化
+  s->set_brightness(s, 0);      // 标准亮度
+  s->set_contrast(s, 0);        // 标准对比度
+  s->set_saturation(s, 0);      // 标准饱和度
+  s->set_sharpness(s, 0);       // 标准锐度
+  s->set_denoise(s, 1);         // 开启降噪
+  s->set_quality(s, 10);        // 质量等级
+  s->set_special_effect(s, 0);  // 无特殊效果
+  s->set_vflip(s, 1);           // 垂直翻转
+  s->set_hmirror(s, 0);         // 不水平镜像
+  
+  // 增益和曝光控制
+  s->set_gain_ctrl(s, 1);       // 自动增益控制
+  s->set_exposure_ctrl(s, 1);   // 自动曝光控制
+  s->set_agc_gain(s, 0);        // 最低增益
+  s->set_awb_gain(s, 1);        // 自动白平衡增益
+  s->set_lenc(s, 1);            // 镜头校正
+  
   // 确保设置为QVGA
   s->set_framesize(s, FRAMESIZE_QVGA);
+  
+  // 延迟一段时间让摄像头稳定
+  delay(300);
 
-#if defined(LED_GPIO_NUM)
-  setupLedFlash(LED_GPIO_NUM);
-#endif
-
-  // 尝试连接多个WiFi
+  // 尝试连接WiFi
   bool connected = false;
   for (int i = 0; i < numWifiOptions; i++) {
     Serial.printf("尝试连接WiFi: %s\n", wifiCredentials[i].ssid);
     
     WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
-    WiFi.setSleep(false);
+    WiFi.setSleep(false);  // 禁用WiFi睡眠模式以提高响应性
     
     // 尝试连接当前WiFi，最多等待3秒
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts <12) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 12) {
       delay(250);
       Serial.print(".");
       attempts++;
@@ -272,70 +280,87 @@ void setup() {
     if (WiFi.status() == WL_CONNECTED) {
       connected = true;
       Serial.println("");
-      Serial.printf("成功连接到 WiFi: %s\n", wifiCredentials[i].ssid);
+      Serial.printf("连接成功: %s\n", wifiCredentials[i].ssid);
       
       // 设置固定IP
       if (USE_FIXED_IP) {
         if (!WiFi.config(staticIP, gateway, subnet, dns)) {
           Serial.println("固定IP配置失败");
         } else {
-          Serial.printf("固定IP地址: %s\n", staticIP.toString().c_str());
+          Serial.printf("IP地址: %s\n", WiFi.localIP().toString().c_str());
         }
       }
-      
       break;
     } else {
       Serial.println("");
-      Serial.printf("无法连接到 WiFi: %s\n", wifiCredentials[i].ssid);
+      Serial.printf("连接失败: %s\n", wifiCredentials[i].ssid);
     }
   }
   
   if (!connected) {
-    Serial.println("无法连接任何WiFi网络，重启设备...");
+    Serial.println("无法连接WiFi，重启设备...");
     ESP.restart();
   }
 
-  // 打印相机当前配置
+  // 打印摄像头配置
   printCameraSettings();
   
   // 初始化性能监控变量
   lastFPSCalculationTime = esp_timer_get_time();
   frameCount = 0;
 
-  // 启动新的简化视频流服务器
+  // 启动视频流服务器
   startSimpleCameraStream();
 
+  // 创建串口监控任务 - 较低优先级
+  xTaskCreatePinnedToCore(
+    serialMonitorTask,    // 任务函数
+    "SerialMonitor",      // 任务名称
+    4096,                 // 降低堆栈大小以节省内存
+    NULL,                 // 参数
+    1,                    // 低优先级
+    &serialMonitorTaskHandle,    // 任务句柄
+    0                     // 在核心0上运行
+  );
+  
+  // 创建系统监控任务
+  xTaskCreatePinnedToCore(
+    systemMonitorTask,    // 任务函数
+    "SysMonitor",         // 任务名称
+    2048,                 // 小堆栈大小
+    NULL,                 // 参数
+    2,                    // 中等优先级
+    NULL,                 // 不需要任务句柄
+    0                     // 在核心0上运行
+  );
+
   Serial.println("====================================");
-  Serial.println("       ESP32-CAM 视频流就绪!        ");
+  Serial.println("       摄像头系统启动完成!          ");
   Serial.println("====================================");
-  Serial.print("打开浏览器访问 http://");
+  Serial.print("访问: http://");
   Serial.print(WiFi.localIP());
-  Serial.println(" 即可查看视频流");
+  Serial.println(" 查看视频流");
   Serial.println("====================================");
 }
 
+// 主循环 - 在核心1上运行，专注于图像处理
 void loop() {
-  // 简化的监控输出，仅每10秒输出一次
-  static unsigned long lastDiagTime = 0;
-  static unsigned long lastBrightTime = 0;
+  // 定时获取图像并处理
+  static unsigned long lastFrameTime = 0;
   unsigned long currentTime = millis();
-  if (currentTime - lastDiagTime >= 10000) {  // 每10秒
-    Serial.printf("摄像头运行中，当前帧率: %.2f FPS\n", currentFPS);
-    Serial.printf("当前IP: %s\n", WiFi.localIP().toString().c_str());
-    lastDiagTime = currentTime;
-  }
 
-  // 每隔0.3秒输出一次最亮点ASCII图
-  if (currentTime - lastBrightTime >= 300) {
+  // 只在不处于繁忙状态时获取和处理帧
+  if (!systemIsBusy && currentTime - lastFrameTime >= 150) {  // 150ms间隔
     camera_fb_t* fb = esp_camera_fb_get();
-    if (fb && fb->format == PIXFORMAT_GRAYSCALE) {
-      int bx, by;
-      find_brightest(fb->buf, fb->width, fb->height, bx, by);
-      Serial.printf("[最亮点] x=%d, y=%d\n", bx, by);
-      print_ascii_frame(fb->width < 32 ? fb->width : 32, fb->height < 16 ? fb->height : 16, bx * (fb->width < 32 ? 1 : 32 / fb->width), by * (fb->height < 16 ? 1 : 16 / fb->height));
+    if (fb) {
+      // 处理帧数据
+      processFrame(fb);
+      // 处理完毕，返回帧缓冲区
       esp_camera_fb_return(fb);
     }
-    lastBrightTime = currentTime;
+    lastFrameTime = currentTime;
   }
-  delay(10);  // 短暂延时防止CPU过载
+  
+  // 短暂延时，让其他任务有机会运行
+  delay(20);
 }
