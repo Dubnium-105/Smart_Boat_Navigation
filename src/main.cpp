@@ -119,7 +119,7 @@ void diagnoseCameraPerformance() {
   // 3. 网络状态
   Serial.printf("WiFi信号强度(RSSI): %d dBm\n", WiFi.RSSI());
   Serial.printf("当前WiFi通道: %d\n", WiFi.channel());
-  Serial.printf("网络MTU: %d字节\n", WiFi.getTxPower());
+  Serial.printf("WiFi传输功率: %d dBm\n", WiFi.getTxPower());
   
   // 4. 帧率测量
   unsigned long currentTime = millis();
@@ -282,7 +282,7 @@ void setup() {
   printCameraSettings();
   
   // 初始化性能监控变量
-  lastFPSCalculationTime = esp_timer_get_time();
+  lastFPSCalculationTime = millis();
   frameCount = 0;
 
   // 启动新的简化视频流服务器
