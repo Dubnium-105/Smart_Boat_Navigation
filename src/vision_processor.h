@@ -28,6 +28,9 @@ extern "C" {
  * - 航线规划
  * - 障碍物检测
  */
+// 添加详细注释，描述视觉处理器类的功能和方法
+// VisionProcessor类用于处理摄像头图像并提取有用信息，例如目标检测、航线规划和障碍物检测。
+// 它包含多个方法来处理图像帧并生成控制信号。
 class VisionProcessor {
 private:
     // 颜色阈值 (使用navigation.h中定义的值)
