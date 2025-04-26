@@ -166,6 +166,8 @@ void diagnoseCameraPerformance() {
 #include "motor_control.h"
 #include "navigation.h"
 #include "tasks.h" // 包含任务创建函数和外部声明
+#include "vision_processor.h" // 添加新的视觉处理器头文件
+#include "ir_vision_processor.h" // 添加IR视觉处理器头文件
 
 // --- 声明外部函数和变量 (来自其他未模块化的文件) ---
 extern "C" { // 如果find_brightest.cpp是C代码编译的，需要这个
@@ -178,6 +180,35 @@ extern float currentFPS;               // 来自 stream.cpp (或由tasks.h提供
 extern unsigned long frameCount;       // 来自 stream.cpp
 extern unsigned long lastFPSCalculationTime; // 来自 stream.cpp
 
+// 摄像头分辨率结构体声明
+struct CustomCameraResolution {
+    int width;
+    int height;
+};
+
+// 摄像头分辨率映射表 - 改名以避免与ESP32 Camera API的定义冲突
+static const CustomCameraResolution camera_resolution[] = {
+    { 96, 96 },     // FRAMESIZE_96X96,    0
+    { 160, 120 },   // FRAMESIZE_QQVGA,    1
+    { 176, 144 },   // FRAMESIZE_QCIF,     2
+    { 240, 176 },   // FRAMESIZE_HQVGA,    3
+    { 240, 240 },   // FRAMESIZE_240X240,  4
+    { 320, 240 },   // FRAMESIZE_QVGA,     5
+    { 400, 296 },   // FRAMESIZE_CIF,      6
+    { 480, 320 },   // FRAMESIZE_HVGA,     7
+    { 640, 480 },   // FRAMESIZE_VGA,      8
+    { 800, 600 },   // FRAMESIZE_SVGA,     9
+    { 1024, 768 },  // FRAMESIZE_XGA,      10
+    { 1280, 720 },  // FRAMESIZE_HD,       11
+    { 1280, 1024 }, // FRAMESIZE_SXGA,     12
+    { 1600, 1200 }, // FRAMESIZE_UXGA,     13
+};
+
+// 获取摄像头配置的函数
+sensor_t* sensor_get_config() {
+    return esp_camera_sensor_get();
+}
+
 // --- 全局共享变量和同步原语 ---
 SemaphoreHandle_t frameAccessMutex = NULL;
 volatile int sharedBrightX = -1; // 初始化为无效值
@@ -188,6 +219,14 @@ volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitor
 // --- 帧处理函数 ---
 // 在每个帧处理时手动调用的函数 (可以考虑移入camera_processing模块)
 void processFrame(camera_fb_t *fb) {
+  // 使用新的视觉处理器处理帧
+  if (g_visionProcessor != nullptr) {
+    // 调用视觉处理器的处理函数
+    g_visionProcessor->processFrame(fb);
+    return;
+  }
+  
+  // 如果视觉处理器未初始化，则使用旧的处理逻辑
   static uint32_t last_frame_time = 0;
   uint32_t now = millis();
   
@@ -221,7 +260,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println("\n\n====================================");
-  Serial.println("      智能船导航系统启动中...     ");
+  Serial.println("      晶能船导航系统启动中...     ");
   Serial.println("====================================");
 
 <<<<<<< HEAD
@@ -426,16 +465,45 @@ void loop() {
 
   // 6. 初始化导航系统
   initNavigation();
+  
+  // 7. 初始化视觉处理器 (新增)
+  sensor_t* sensor = sensor_get_config();
+  if (sensor == nullptr || sensor->status.framesize < 0) {
+    Serial.println("警告: 摄像头配置不可用，无法初始化视觉处理器");
+  } else {
+    // 获取摄像头分辨率
+    int framesize = sensor->status.framesize;
+    if (framesize >= 0 && framesize < sizeof(camera_resolution)/sizeof(camera_resolution[0])) {
+      int width = camera_resolution[framesize].width;
+      int height = camera_resolution[framesize].height;
+      
+      // 初始化视觉处理器
+      if (initVisionProcessor(width, height)) {
+        Serial.println("视觉处理器初始化成功");
+      } else {
+        Serial.println("视觉处理器初始化失败，将使用基本处理");
+      }
+      
+      // 初始化IR视觉处理器
+      if (initIRVisionProcessor(width, height)) {
+        Serial.println("IR视觉处理器初始化成功");
+      } else {
+        Serial.println("IR视觉处理器初始化失败");
+      }
+    } else {
+      Serial.printf("警告: 无效的framesize: %d\n", framesize);
+    }
+  }
 
-  // 7. 初始化性能监控变量 (移到stream.cpp或全局?)
+  // 8. 初始化性能监控变量 (移到stream.cpp或全局?)
   lastFPSCalculationTime = esp_timer_get_time();
   frameCount = 0;
 
-  // 8. 启动视频流服务器 (假设在核心1运行)
+  // 9. 启动视频流服务器 (假设在核心1运行)
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
-  // 9. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
+  // 10. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
   createSerialMonitorTask(0); 
   createSystemMonitorTask(0);
 
