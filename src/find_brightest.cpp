@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 // 优化后的最亮点检测函数 - 使用跳跃式扫描减少计算量，提高效率
-void find_brightest(const uint8_t* gray, int width, int height, int& out_x, int& out_y) {
+void find_brightest(const unsigned char* gray, int width, int height, int& out_x, int& out_y) {
     int max_val = -1;
     out_x = width / 2;  // 默认为中心点
     out_y = height / 2;
