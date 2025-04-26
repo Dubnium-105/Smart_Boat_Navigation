@@ -7,6 +7,10 @@
 extern WiFiClient espClient;
 extern PubSubClient mqttClient;
 
+// 添加详细注释，描述MQTT管理模块的功能
+// mqtt_manager.h定义了与MQTT服务器的连接、消息处理和回调函数。
+// 它支持通过MQTT主题控制电机速度和发布状态信息。
+
 /**
  * @brief 设置MQTT客户端（服务器、端口、回调函数、缓冲区大小）。
  */

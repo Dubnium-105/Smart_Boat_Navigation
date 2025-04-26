@@ -24,6 +24,9 @@
  * - 主循环处理摄像头帧、MQTT消息和导航逻辑
 >>>>>>> b6f6602 (feat: Implement camera setup, motor control, and MQTT management)
  */
+// 添加详细注释，描述主程序的功能和初始化过程
+// main.cpp是ESP32-S3摄像头智能船导航系统的主程序。
+// 它负责初始化摄像头、WiFi、MQTT、电机和导航系统，并启动视频流服务器和后台任务。
 #include <Arduino.h>
 #include "esp_camera.h"
 #include "esp_timer.h"
@@ -260,7 +263,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println("\n\n====================================");
-  Serial.println("      晶能船导航系统启动中...     ");
+  Serial.println("      船导航系统启动中...     ");
   Serial.println("====================================");
 
 <<<<<<< HEAD
@@ -495,7 +498,7 @@ void loop() {
     }
   }
 
-  // 8. 初始化性能监控变量 (移到stream.cpp或全局?)
+  // 8. 初始化性能监控变量 
   lastFPSCalculationTime = esp_timer_get_time();
   frameCount = 0;
 

@@ -5,6 +5,10 @@
 #include <Arduino.h>
 #include "motor_control.h" // 直接包含电机控制头文件而不是使用外部声明
 
+// 添加详细注释，描述导航模块的功能和状态机
+// navigation.h定义了导航系统的状态机、颜色检测阈值和相关函数。
+// 它支持多种任务状态，例如寻找光电门、避障和寻找目标浮标。
+
 // 任务状态定义
 enum NavigationState {
   IDLE,                // 空闲状态

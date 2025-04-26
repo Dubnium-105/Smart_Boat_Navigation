@@ -24,6 +24,10 @@ extern const int RED_V_HIGH;
 // 全局实例
 IRVisionProcessor* g_irVisionProcessor = nullptr;
 
+// 添加详细注释，描述IR视觉处理器的功能和实现
+// IRVisionProcessor类用于处理红外摄像头图像，检测目标、门和浮标。
+// 它实现了基于颜色和亮度的目标检测算法，并生成导航控制信号。
+
 // 构造函数实现
 IRVisionProcessor::IRVisionProcessor(int width, int height) :
     frameWidth(width),
