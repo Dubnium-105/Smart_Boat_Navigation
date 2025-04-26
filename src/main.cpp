@@ -19,7 +19,7 @@
 #include "freertos/semphr.h"
 #include "esp_http_server.h" // 添加HTTP服务器头文件
 
-// --- 包含新模块的头文件 ---
+// --- 包含新模块的头文件 --- 
 #include "camera_setup.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
