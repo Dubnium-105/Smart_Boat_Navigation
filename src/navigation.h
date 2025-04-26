@@ -3,6 +3,7 @@
 
 #include "esp_camera.h"
 #include <Arduino.h>
+#include "motor_control.h" // 直接包含电机控制头文件而不是使用外部声明
 
 // 任务状态定义
 enum NavigationState {
@@ -58,7 +59,6 @@ bool detectGate(int brightX, int brightY, int &targetX, int &targetY);
 void calculateSteering(int targetX, int targetY, int imageWidth, int imageHeight, 
                        int &leftSpeed, int &rightSpeed);
 
-// 外部函数声明 - 从main.cpp调用
-extern void motor_control(uint8_t motor, int speed);
+// 移除了对motor_control的外部声明，因为已经包含了motor_control.h
 
 #endif // NAVIGATION_H

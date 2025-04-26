@@ -1,0 +1,66 @@
+#include "motor_control.h"
+#include <Arduino.h>
+#include <esp32-hal-ledc.h> // 显式包含ledc库
+
+/**
+ * 初始化电机控制函数 - 配置PWM通道和引脚
+ */
+void setup_motors() {
+  Serial.println("初始化电机控制...");
+  
+  // 设置四个PWM通道用于控制两个电机
+  ledcSetup(0, 5000, 8);  // 电机A方向1，5kHz频率，8位分辨率
+  ledcAttachPin(MOTOR_A_IN1, 0);
+  ledcSetup(1, 5000, 8);  // 电机A方向2
+  ledcAttachPin(MOTOR_A_IN2, 1);
+  ledcSetup(2, 5000, 8);  // 电机B方向1
+  ledcAttachPin(MOTOR_B_IN3, 2);
+  ledcSetup(3, 5000, 8);  // 电机B方向2
+  ledcAttachPin(MOTOR_B_IN4, 3);
+  
+  // 初始化时停止所有电机
+  ledcWrite(0, 0);
+  ledcWrite(1, 0);
+  ledcWrite(2, 0);
+  ledcWrite(3, 0);
+  
+  Serial.println("电机控制初始化完成");
+}
+
+/**
+ * 控制电机运动
+ * @param motor 电机选择 (0=电机A, 1=电机B)
+ * @param speed 速度值 (-100到100，负值表示反向)
+ */
+void motor_control(uint8_t motor, int speed) {
+  // 确保速度在-100到100范围内
+  speed = constrain(speed, -100, 100);
+  
+  uint8_t pin1_channel, pin2_channel;
+  
+  if (motor == 0) { // 电机A
+    pin1_channel = 0; // MOTOR_A_IN1
+    pin2_channel = 1; // MOTOR_A_IN2
+  } else if (motor == 1) { // 电机B
+    pin1_channel = 2; // MOTOR_B_IN3
+    pin2_channel = 3; // MOTOR_B_IN4
+  } else {
+    return; // 无效电机编号
+  }
+
+  if (speed > 0) { // 正转
+    int pwmValue = map(speed, 0, 100, 0, 255);
+    ledcWrite(pin1_channel, pwmValue);
+    ledcWrite(pin2_channel, 0);
+    // Serial.printf("Motor %d Forward: PWM=%d\n", motor, pwmValue);
+  } else if (speed < 0) { // 反转
+    int pwmValue = map(abs(speed), 0, 100, 0, 255);
+    ledcWrite(pin1_channel, 0);
+    ledcWrite(pin2_channel, pwmValue);
+    // Serial.printf("Motor %d Reverse: PWM=%d\n", motor, pwmValue);
+  } else { // 停止
+    ledcWrite(pin1_channel, 0);
+    ledcWrite(pin2_channel, 0);
+    // Serial.printf("Motor %d Stop\n", motor);
+  }
+}

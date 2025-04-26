@@ -1,6 +1,12 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include "find_brightest.h" // 包含自己的头文件
+
+// 确保兼容C/C++编译器
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // 优化后的最亮点检测函数 - 使用跳跃式扫描减少计算量，提高效率
 void find_brightest(const uint8_t* gray, int width, int height, int& out_x, int& out_y) {
@@ -114,3 +120,7 @@ void print_ascii_frame(int width, int height, int bx, int by) {
     // 输出原始坐标信息
     printf("原始坐标: x=%d, y=%d\n", bx, by);
 }
+
+#ifdef __cplusplus
+}
+#endif
