@@ -82,7 +82,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   // 处理电机控制消息
   if (strcmp(topic, "/motor") == 0) {
     // 使用ArduinoJson解析JSON数据
-    JsonDocument doc; // 使用动态内存分配的JsonDocument以适应不同大小
+    DynamicJsonDocument doc(256); // 使用动态内存分配的JsonDocument并指定容量
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error) {
