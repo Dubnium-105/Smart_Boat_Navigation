@@ -67,3 +67,18 @@ bool connectWiFi() {
   }
   return connected;
 }
+
+bool wifiAutoReconnect() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
+    Serial.println("WiFi断开，尝试自动重连...");
+    if (!connectWiFi()) {
+        Serial.println("WiFi重连失败，等待下次循环...");
+        delay(1000); // 可适当延长等待，避免频繁重试
+        return false;
+    } else {
+        Serial.println("WiFi重连成功");
+        return true;
+    }
+}

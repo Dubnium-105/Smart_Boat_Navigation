@@ -27,13 +27,20 @@ bool mqtt_reconnect() {
     // 创建一个随机的客户端ID
     String clientId = "ESP32-CAM-";
     clientId += String(random(0xffff), HEX); 
-    
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("已连接到MQTT服务器");
       // 重新订阅主题
       mqttClient.subscribe("/motor"); // 订阅电机控制主题
-      mqttClient.publish("/ESP32_info", "ESP32-CAM已上线"); // 发布上线消息
-      mqttClient.publish("/motor/status", "电机控制已就绪"); // 发布电机状态
+      // 构造JSON格式上线信息，包含WiFi状态
+      DynamicJsonDocument doc(256);
+      doc["msg"] = "ESP32-CAM已上线";
+      doc["wifi_ssid"] = WiFi.SSID();
+      doc["wifi_rssi"] = WiFi.RSSI();
+      doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+      String infoStr;
+      serializeJson(doc, infoStr);
+      mqttClient.publish("/ESP32_info", infoStr.c_str());
+      mqttClient.publish("/motor/status", "电机控制已就绪");
       return true;
     } else {
       Serial.print("MQTT连接失败, rc=");

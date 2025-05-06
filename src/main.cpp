@@ -212,6 +212,11 @@ void setup() {
 
 // --- Arduino Loop ---
 void loop() {
+  // --- WiFi断线自动重连（模块化调用） ---
+  if (!wifiAutoReconnect()) {
+    // WiFi未连上，跳过本次循环
+    return;
+  }
   static unsigned long lastMqttReconnectAttempt = 0;
   static unsigned long lastFrameProcessTime = 0;
   static unsigned long lastNavigationUpdateTime = 0;
