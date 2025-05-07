@@ -87,6 +87,55 @@ void find_brightest(const unsigned char* gray, int width, int height, int& out_x
     }
 }
 
+// 亮区质心法+ROI
+void find_brightest_centroid_roi(const unsigned char* gray, int width, int height, int& out_x, int& out_y, int last_x, int last_y, int roi_size) {
+    // 1. 先在ROI内找最大值
+    int roi_half = roi_size / 2;
+    int x0 = (last_x < 0) ? 0 : last_x - roi_half;
+    int y0 = (last_y < 0) ? 0 : last_y - roi_half;
+    int x1 = (last_x < 0) ? width : last_x + roi_half;
+    int y1 = (last_y < 0) ? height : last_y + roi_half;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > width) x1 = width;
+    if (y1 > height) y1 = height;
+
+    int max_val = -1;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            int val = gray[y * width + x];
+            if (val > max_val) {
+                max_val = val;
+            }
+        }
+    }
+    if (max_val < 0) {
+        out_x = width / 2;
+        out_y = height / 2;
+        return;
+    }
+    // 2. 动态阈值（如max*0.85）
+    int threshold = (int)(max_val * 0.85f);
+    int sum_x = 0, sum_y = 0, count = 0;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            int val = gray[y * width + x];
+            if (val >= threshold) {
+                sum_x += x;
+                sum_y += y;
+                count++;
+            }
+        }
+    }
+    if (count > 0) {
+        out_x = sum_x / count;
+        out_y = sum_y / count;
+    } else {
+        out_x = width / 2;
+        out_y = height / 2;
+    }
+}
+
 // 优化ASCII显示函数，显示红外光点位置
 void print_ascii_frame(int width, int height, int bx, int by) {
     // 确保最亮点坐标在矩阵范围内

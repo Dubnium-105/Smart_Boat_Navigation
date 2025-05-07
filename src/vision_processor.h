@@ -18,6 +18,8 @@ extern int targetColorIndex; // 来自navigation.h
 extern "C" {
     void find_brightest(const unsigned char* gray, int width, int height, int& out_x, int& out_y);
     void print_ascii_frame(int width, int height, int bx, int by);
+    // 新增：亮区质心法+ROI
+    void find_brightest_centroid_roi(const unsigned char* gray, int width, int height, int& out_x, int& out_y, int last_x, int last_y, int roi_size);
 }
 
 /**

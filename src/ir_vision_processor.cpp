@@ -94,27 +94,20 @@ cv::Point2f IRVisionProcessor::detectTarget(camera_fb_t *fb, bool isRedTarget) {
     }
 }
 
-// 门检测函数实现 (基于霍夫线变换的概念)
+// 门检测函数实现 (基于亮区质心法+ROI)
 std::vector<cv::Rect> IRVisionProcessor::detectGates(camera_fb_t *fb) {
     std::vector<cv::Rect> gates;
-    
-    // 在ESP32环境中，我们使用简化的逻辑，基于最亮点检测
-    int gateX = -1, gateY = -1;
+    static int lastBrightX = -1, lastBrightY = -1;
     int brightX = -1, brightY = -1;
-    
-    // 先获取最亮点
-    find_brightest(fb->buf, fb->width, fb->height, brightX, brightY);
-    
-    // 然后尝试识别门
-    if (detectGate(brightX, brightY, gateX, gateY)) {
-        // 检测到光电门，创建一个代表门的矩形
-        // 这里假设门的大小
-        int gateWidth = 50;
-        int gateHeight = 100;
-        gates.push_back(cv::Rect(gateX - gateWidth/2, gateY - gateHeight/2, 
-                                 gateWidth, gateHeight));
-    }
-    
+    // 只在上次亮点附近ROI做亮区质心法，首次或丢失时全图
+    int roi_size = 40;
+    find_brightest_centroid_roi(fb->buf, fb->width, fb->height, brightX, brightY, lastBrightX, lastBrightY, roi_size);
+    lastBrightX = brightX;
+    lastBrightY = brightY;
+    // 检测门逻辑（可选，直接用亮点中心即可）
+    int gateWidth = 50;
+    int gateHeight = 100;
+    gates.push_back(cv::Rect(brightX - gateWidth/2, brightY - gateHeight/2, gateWidth, gateHeight));
     return gates;
 }
 

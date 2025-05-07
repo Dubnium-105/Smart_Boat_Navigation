@@ -234,49 +234,32 @@ void loop() {
     mqttClient.loop(); // 处理传入消息和保持连接
   }
 
-  // 2. 获取并处理摄像头帧 (如果系统不繁忙)
-  // 增加帧处理间隔，例如100ms获取一次图像
-  if (!systemIsBusy && (currentTime - lastFrameProcessTime >= 100)) { 
+  // 2. 获取并处理摄像头帧 (限制为30fps)
+  if (!systemIsBusy && (currentTime - lastFrameProcessTime >= 33)) {
     lastFrameProcessTime = currentTime;
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
       // a. 处理帧数据 (例如，查找最亮点)
-      processFrame(fb); 
-      
+      processFrame(fb);
       // b. 安全地获取最新的最亮点数据 (用于导航)
       int currentBrightX = -1, currentBrightY = -1;
       if (xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        // 读取共享变量，即使newBrightPointAvailable是false也读取当前值
         currentBrightX = sharedBrightX;
         currentBrightY = sharedBrightY;
-        // 注意：导航逻辑可能需要知道数据是否是"新"的，
-        // 但为了简化，这里直接读取最新值。
-        // 如果需要区分新旧，可以在获取锁后检查 newBrightPointAvailable
         xSemaphoreGive(frameAccessMutex);
-      } else {
-         // Serial.println("Loop: 未能获取锁读取最亮点"); // 调试信息
       }
-
       // c. 更新导航状态机 (增加导航更新间隔，例如300ms)
       if (currentTime - lastNavigationUpdateTime >= 300) {
-          lastNavigationUpdateTime = currentTime;
-          // 将当前帧和获取到的最亮点信息传递给导航状态机
-          navigationStateMachine(fb, currentBrightX, currentBrightY); 
+        lastNavigationUpdateTime = currentTime;
+        navigationStateMachine(fb, currentBrightX, currentBrightY);
       }
-      
       // d. 处理完毕，返回帧缓冲区
       esp_camera_fb_return(fb);
-    } else {
-      // Serial.println("未能获取摄像头帧"); // 调试信息
     }
   } else if (systemIsBusy) {
-      // Serial.println("系统繁忙，跳过帧处理"); // 调试信息
-      // 当系统繁忙时，可以考虑降低电机速度或执行安全操作
-      // motor_control(0, 0);
-      // motor_control(1, 0);
+    // 系统繁忙时可选处理
   }
 
   // 3. 短暂延时，让其他任务有机会运行
-  // vTaskDelay(pdMS_TO_TICKS(10)); // 使用FreeRTOS延时更佳
-  delay(10); // 简单延时
+  delay(1); // 保持高帧率时建议用1ms
 }

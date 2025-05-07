@@ -25,6 +25,7 @@ void find_brightest(const unsigned char* gray, int width, int height, int& out_x
  * @param by 要标记的点的y坐标
  */
 void print_ascii_frame(int width, int height, int bx, int by);
+void find_brightest_centroid_roi(const unsigned char* gray, int width, int height, int& out_x, int& out_y, int last_x, int last_y, int roi_size);
 
 #ifdef __cplusplus
 }

@@ -25,7 +25,7 @@ bool setupCamera() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 10000000;  // 10MHz时钟频率
-  config.frame_size = FRAMESIZE_QVGA;  // 320x240 分辨率
+  config.frame_size = FRAMESIZE_QQVGA;  // 160x120 分辨率（QQVGA，已确认调整）
   config.pixel_format = PIXFORMAT_GRAYSCALE;  // 灰度图格式
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // 帧缓冲区空闲时捕获，更稳定
   config.fb_location = CAMERA_FB_IN_PSRAM;    // 优先使用PSRAM存储帧
@@ -35,7 +35,7 @@ bool setupCamera() {
   // PSRAM检测及配置
   if (!psramFound()) {
     Serial.println("警告: 未找到PSRAM，功能可能受限。将使用DRAM存储帧。");
-    config.frame_size = FRAMESIZE_QVGA; // 确保在无PSRAM时使用较小分辨率
+    config.frame_size = FRAMESIZE_QQVGA; // 确保在无PSRAM时使用较小分辨率
     config.fb_location = CAMERA_FB_IN_DRAM;
     config.fb_count = 1; // DRAM有限，只用一个buffer
   } else {
@@ -81,12 +81,12 @@ bool setupCamera() {
   s->set_lenc(s, 1);            // 开启镜头校正
 
   // 再次确认帧大小设置成功
-  if (s->status.framesize != FRAMESIZE_QVGA) {
-      Serial.printf("警告: 帧大小未能成功设置为QVGA，当前为 %d。尝试重新设置...\n", s->status.framesize);
-      s->set_framesize(s, FRAMESIZE_QVGA);
+  if (s->status.framesize != FRAMESIZE_QQVGA) {
+      Serial.printf("警告: 帧大小未能成功设置为QQVGA（160x120），当前为 %d。尝试重新设置...\n", s->status.framesize);
+      s->set_framesize(s, FRAMESIZE_QQVGA);
       delay(100); // 等待设置生效
-      if (s->status.framesize != FRAMESIZE_QVGA) {
-          Serial.println("错误: 无法将帧大小设置为QVGA。");
+      if (s->status.framesize != FRAMESIZE_QQVGA) {
+          Serial.println("错误: 无法将帧大小设置为QQVGA。");
           // 可以选择返回false或继续，取决于应用要求
       }
   }
