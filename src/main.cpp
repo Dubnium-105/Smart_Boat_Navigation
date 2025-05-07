@@ -75,6 +75,9 @@ volatile int sharedBrightX = -1; // 初始化为无效值
 volatile int sharedBrightY = -1;
 volatile bool newBrightPointAvailable = false;
 volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitorTask更新)
+bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
+                              // 如果摄像头初始化失败，系统会跳过与视觉和导航相关的功能，
+                              // 并避免尝试处理摄像头帧，从而防止潜在的崩溃或错误。
 
 // --- 帧处理函数 ---
 // 在每个帧处理时手动调用的函数 (可以考虑移入camera_processing模块)
@@ -129,15 +132,22 @@ void setup() {
     delay(1000);
     ESP.restart();
   }
-  Serial.println("帧访问互斥锁已创建");
-
-  // 2. 初始化摄像头
-  if (!setupCamera()) {
-    Serial.println("摄像头初始化失败，重启...");
-    delay(1000);
-    ESP.restart();
+  // 2. 初始化摄像头 (增加重试机制)
+  const int maxCameraRetries = 3;
+  int cameraRetryCount = 0;
+  while (cameraRetryCount < maxCameraRetries) {
+    cameraAvailable = setupCamera();
+    if (cameraAvailable) {
+      printCameraSettings(); // 打印摄像头配置
+      break;
+    }
+    Serial.printf("摄像头初始化失败，重试中 (%d/%d)...\n", cameraRetryCount + 1, maxCameraRetries);
+    cameraRetryCount++;
+    delay(1000); // 等待1秒后重试
   }
-  printCameraSettings(); // 打印摄像头配置
+  if (!cameraAvailable) {
+    Serial.println("摄像头初始化失败，启用降级模式：仅WiFi和MQTT功能");
+  }
 
   // 3. 初始化电机
   setup_motors();
@@ -235,7 +245,7 @@ void loop() {
   }
 
   // 2. 获取并处理摄像头帧 (限制为30fps)
-  if (!systemIsBusy && (currentTime - lastFrameProcessTime >= 33)) {
+  if (cameraAvailable && !systemIsBusy && (currentTime - lastFrameProcessTime >= 33)) {
     lastFrameProcessTime = currentTime;
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
@@ -256,6 +266,9 @@ void loop() {
       // d. 处理完毕，返回帧缓冲区
       esp_camera_fb_return(fb);
     }
+  } else if (!cameraAvailable) {
+    // 摄像头不可用时可执行其他无关操作
+    // ...如仅处理MQTT、WiFi、传感器等...
   } else if (systemIsBusy) {
     // 系统繁忙时可选处理
   }
