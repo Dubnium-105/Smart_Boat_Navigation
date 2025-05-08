@@ -19,8 +19,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   size_t _jpg_buf_len = 0;
   uint8_t *_jpg_buf = NULL;
-  char *part_buf[128];
+  char part_buf[128];
   static int64_t last_frame = 0;
+  uint8_t *dynamic_gray_buf = NULL; // 动态分配灰度缓冲区
   if (!last_frame) {
     last_frame = esp_timer_get_time();
   }
@@ -34,10 +35,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     if (!fb) {
       res = ESP_FAIL;
     } else {
-      // 强制转换为灰度图（如果不是灰度格式则转换）
       if (fb->format == PIXFORMAT_GRAYSCALE) {
         // 直接JPEG编码
-        bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+        bool jpeg_converted = frame2jpg(fb, 40, &_jpg_buf, &_jpg_buf_len); // 降低JPEG质量提升速度
         esp_camera_fb_return(fb);
         fb = NULL;
         if (!jpeg_converted) {
@@ -46,17 +46,18 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       } else {
         // 非灰度帧，先转换为灰度再编码
         size_t gray_len = fb->width * fb->height;
-        uint8_t *gray_buf = (uint8_t *)malloc(gray_len);
-        if (gray_buf) {
+        dynamic_gray_buf = (uint8_t *)malloc(gray_len);
+        if (dynamic_gray_buf) {
           // 简单平均法灰度化
           for (size_t i = 0; i < gray_len; ++i) {
             uint8_t r = fb->buf[i * 3 + 0];
             uint8_t g = fb->buf[i * 3 + 1];
             uint8_t b = fb->buf[i * 3 + 2];
-            gray_buf[i] = (r * 38 + g * 75 + b * 15) >> 7; // 近似加权
+            dynamic_gray_buf[i] = (r * 38 + g * 75 + b * 15) >> 7;
           }
-          bool jpeg_converted = fmt2jpg(gray_buf, gray_len, fb->width, fb->height, PIXFORMAT_GRAYSCALE, 80, &_jpg_buf, &_jpg_buf_len);
-          free(gray_buf);
+          bool jpeg_converted = fmt2jpg(dynamic_gray_buf, gray_len, fb->width, fb->height, PIXFORMAT_GRAYSCALE, 40, &_jpg_buf, &_jpg_buf_len);
+          free(dynamic_gray_buf);
+          dynamic_gray_buf = NULL;
           esp_camera_fb_return(fb);
           fb = NULL;
           if (!jpeg_converted) {
@@ -70,14 +71,14 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       }
     }
     if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-    }
-    if (res == ESP_OK) {
-      size_t hlen = snprintf((char *)part_buf, 128, _STREAM_PART, _jpg_buf_len);
-      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
-    }
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+      // 合并头和JPEG数据发送
+      size_t hlen = snprintf(part_buf, sizeof(part_buf), "%s%s%u%s", _STREAM_BOUNDARY, "Content-Type: image/jpeg\r\nContent-Length: ", (unsigned)_jpg_buf_len, "\r\n\r\n");
+      // 先发送边界+头
+      res = httpd_resp_send_chunk(req, part_buf, hlen);
+      if (res == ESP_OK) {
+        // 再发送JPEG数据
+        res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+      }
     }
     if (_jpg_buf) {
       free(_jpg_buf);

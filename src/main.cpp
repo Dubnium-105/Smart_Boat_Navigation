@@ -222,57 +222,51 @@ void setup() {
 
 // --- Arduino Loop ---
 void loop() {
-  // --- WiFi断线自动重连（模块化调用） ---
   if (!wifiAutoReconnect()) {
-    // WiFi未连上，跳过本次循环
     return;
   }
   static unsigned long lastMqttReconnectAttempt = 0;
-  static unsigned long lastFrameProcessTime = 0;
   static unsigned long lastNavigationUpdateTime = 0;
   unsigned long currentTime = millis();
 
   // 1. 处理MQTT连接和消息
   if (!mqttClient.connected()) {
-    // 每隔5秒尝试重连MQTT
     if (currentTime - lastMqttReconnectAttempt > 5000) {
       lastMqttReconnectAttempt = currentTime;
       Serial.println("MQTT断开连接，尝试重连...");
       mqtt_reconnect();
     }
   } else {
-    mqttClient.loop(); // 处理传入消息和保持连接
+    mqttClient.loop();
   }
 
-  // 2. 获取并处理摄像头帧 (限制为30fps)
-  if (cameraAvailable && !systemIsBusy && (currentTime - lastFrameProcessTime >= 33)) {
-    lastFrameProcessTime = currentTime;
+  // 2. 获取并处理摄像头帧（不再限制帧率，尽快处理）
+  if (cameraAvailable && !systemIsBusy) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
-      // a. 处理帧数据 (例如，查找最亮点)
-      processFrame(fb);
-      // b. 安全地获取最新的最亮点数据 (用于导航)
+            unsigned long t1 = millis();
+            processFrame(fb);
+            unsigned long t2 = millis();
+      #ifdef DEBUG
+            Serial.printf("[PROFILE] processFrame耗时: %lu ms\n", t2 - t1);
+      #endif
       int currentBrightX = -1, currentBrightY = -1;
       if (xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         currentBrightX = sharedBrightX;
         currentBrightY = sharedBrightY;
         xSemaphoreGive(frameAccessMutex);
       }
-      // c. 更新导航状态机 (增加导航更新间隔，例如300ms)
       if (currentTime - lastNavigationUpdateTime >= 300) {
         lastNavigationUpdateTime = currentTime;
         navigationStateMachine(fb, currentBrightX, currentBrightY);
       }
-      // d. 处理完毕，返回帧缓冲区
       esp_camera_fb_return(fb);
     }
   } else if (!cameraAvailable) {
     // 摄像头不可用时可执行其他无关操作
-    // ...如仅处理MQTT、WiFi、传感器等...
   } else if (systemIsBusy) {
     // 系统繁忙时可选处理
   }
 
-  // 3. 短暂延时，让其他任务有机会运行
-  delay(1); // 保持高帧率时建议用1ms
+  delay(2); // 保持高帧率时建议用1ms
 }

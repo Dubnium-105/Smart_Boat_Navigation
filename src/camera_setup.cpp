@@ -24,7 +24,7 @@ bool setupCamera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;  // 10MHz时钟频率
+  config.xclk_freq_hz = 20000000;  // 20MHz时钟频率
   config.frame_size = FRAMESIZE_QQVGA;  // 160x120 分辨率（QQVGA，已确认调整）
   config.pixel_format = PIXFORMAT_GRAYSCALE;  // 灰度图格式
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // 帧缓冲区空闲时捕获，更稳定
@@ -65,9 +65,9 @@ bool setupCamera() {
   s->set_brightness(s, 0);      // 标准亮度
   s->set_contrast(s, 0);        // 标准对比度
   s->set_saturation(s, 0);      // 标准饱和度 (灰度图可能无效)
-  s->set_sharpness(s, 0);       // 标准锐度
+  s->set_sharpness(s, 1);       // 标准锐度
   s->set_denoise(s, 1);         // 开启降噪
-  s->set_quality(s, 10);        // 图像质量 (影响JPEG压缩，对灰度图处理影响较小)
+  s->set_quality(s, 60);        // 图像质量 (影响JPEG压缩，对灰度图处理影响较小)
   s->set_special_effect(s, 0);  // 无特殊效果
   s->set_vflip(s, 1);           // 垂直翻转图像
   s->set_hmirror(s, 0);         // 不水平镜像
