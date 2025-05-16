@@ -13,10 +13,12 @@ struct WifiCredential {
   const char* password;
 };
 
+//WIFI 必须要是2.4G频段的,esp32-s3-CAM仅支持2.4G频段。
 const WifiCredential wifiCredentials[] = {
   {"room@407", "room@407"},
   {"xbox", "12345678"},
-  {"xbox", "z1139827642"}
+  {"xbox", "z1139827642"},
+  
   // 可以添加更多WiFi凭据
 };
 const int numWifiOptions = sizeof(wifiCredentials) / sizeof(wifiCredentials[0]);
