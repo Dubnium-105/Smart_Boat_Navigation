@@ -11,12 +11,14 @@ const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-// 外部声明，用于获取中转服务器状态和系统状态变量
+// 外部变量声明
 extern bool useStreamServer;
 extern const char* streamServerUrl;
-extern void configureStreamServer(bool enable, const char* serverUrl);
 extern float currentFPS;
 extern volatile bool systemIsBusy;
+
+// 声明来自stream.cpp的函数
+extern void configureStreamServer(bool enable, const char* serverUrl);
 
 void setupMQTT() {
   randomSeed(esp_random()); // 使用ESP32硬件随机数生成器
