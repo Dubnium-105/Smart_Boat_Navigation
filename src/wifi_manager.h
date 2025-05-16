@@ -4,7 +4,7 @@
 #include <WiFi.h>
 
 // 固定IP设置
-#define USE_FIXED_IP true
+#define USE_FIXED_IP false
 extern IPAddress staticIP;
 extern IPAddress gateway;
 extern IPAddress subnet;

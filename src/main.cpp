@@ -1,15 +1,12 @@
 /**
- * ESP32-S3摄像头智能船导航系统 - 主程序
+ * ESP32-S3摄像头手动船舶控制系统 - 主程序
  * 
  * 功能:
- * - 初始化摄像头、WiFi、MQTT、电机、导航系统
- * - 启动视频流服务器
+ * - 初始化摄像头、WiFi、MQTT、电机
+ * - 启动视频流服务器并推送至中转服务器
  * - 创建后台任务 (串口监控、系统监控)
- * - 主循环处理摄像头帧、MQTT消息和导航逻辑
+ * - 主循环处理摄像头帧和MQTT消息
  */
-// 添加详细注释，描述主程序的功能和初始化过程
-// main.cpp是ESP32-S3摄像头智能船导航系统的主程序。
-// 它负责初始化摄像头、WiFi、MQTT、电机和导航系统，并启动视频流服务器和后台任务。
 #include <Arduino.h>
 #include "esp_camera.h"
 #include "esp_timer.h"
@@ -19,24 +16,17 @@
 #include "freertos/semphr.h"
 #include "esp_http_server.h" // 添加HTTP服务器头文件
 
-// --- 包含新模块的头文件 --- 
+// --- 包含需要的模块的头文件 --- 
 #include "camera_setup.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "motor_control.h"
-#include "navigation.h"
 #include "tasks.h" // 包含任务创建函数和外部声明
-#include "vision_processor.h" // 添加新的视觉处理器头文件
-#include "ir_vision_processor.h" // 添加IR视觉处理器头文件
 
-// --- 声明外部函数和变量 (来自其他未模块化的文件) ---
-extern "C" { // 如果find_brightest.cpp是C代码编译的，需要这个
-    #include "find_brightest.h" // 包含find_brightest函数声明
-}
-// extern void find_brightest(const uint8_t* gray, int width, int height, int& out_x, int& out_y); // 或者直接声明
+// --- 声明外部函数和变量 ---
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
-extern float currentFPS;               // 来自 stream.cpp (或由tasks.h提供)
+extern float currentFPS;               // 来自 stream.cpp
 extern unsigned long frameCount;       // 来自 stream.cpp
 extern unsigned long lastFPSCalculationTime; // 来自 stream.cpp
 
@@ -71,58 +61,15 @@ sensor_t* sensor_get_config() {
 
 // --- 全局共享变量和同步原语 ---
 SemaphoreHandle_t frameAccessMutex = NULL;
-volatile int sharedBrightX = -1; // 初始化为无效值
-volatile int sharedBrightY = -1;
-volatile bool newBrightPointAvailable = false;
 volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitorTask更新)
 bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
-                              // 如果摄像头初始化失败，系统会跳过与视觉和导航相关的功能，
-                              // 并避免尝试处理摄像头帧，从而防止潜在的崩溃或错误。
-
-// --- 帧处理函数 ---
-// 在每个帧处理时手动调用的函数 (可以考虑移入camera_processing模块)
-void processFrame(camera_fb_t *fb) {
-  // 使用新的视觉处理器处理帧
-  if (g_visionProcessor != nullptr) {
-    // 调用视觉处理器的处理函数
-    g_visionProcessor->processFrame(fb);
-    return;
-  }
-  
-  // 如果视觉处理器未初始化，则使用旧的处理逻辑
-  static uint32_t last_frame_time = 0;
-  uint32_t now = millis();
-  
-  // 降低处理频率，例如每200ms处理一次最亮点查找
-  if (now - last_frame_time > 200) {
-    last_frame_time = now;
-    
-    // 尝试获取互斥锁，超时时间短以避免阻塞视频流
-    if (xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (fb && fb->format == PIXFORMAT_GRAYSCALE) {
-        int bx, by;
-        // 调用最亮点查找函数 (假设已正确包含或声明)
-        find_brightest(fb->buf, fb->width, fb->height, bx, by);
-        
-        // 更新共享变量
-        sharedBrightX = bx;
-        sharedBrightY = by;
-        newBrightPointAvailable = true; // 标记有新数据
-      }
-      xSemaphoreGive(frameAccessMutex); // 释放锁
-    } else {
-        // Serial.println("processFrame: 未能获取锁"); // 调试信息
-    }
-  }
-}
-
 
 // --- Arduino Setup ---
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println("\n\n====================================");
-  Serial.println("      船导航系统启动中...     ");
+  Serial.println("      船舶手动控制系统启动中...     ");
   Serial.println("====================================");
 
   // 1. 创建互斥锁 (必须在任务使用前创建)
@@ -132,6 +79,7 @@ void setup() {
     delay(1000);
     ESP.restart();
   }
+  
   // 2. 初始化摄像头 (增加重试机制)
   const int maxCameraRetries = 3;
   int cameraRetryCount = 0;
@@ -166,47 +114,15 @@ void setup() {
       mqtt_reconnect(); 
   }
 
-  // 6. 初始化导航系统
-  initNavigation();
-  
-  // 7. 初始化视觉处理器 (新增)
-  sensor_t* sensor = sensor_get_config();
-  if (sensor == nullptr || sensor->status.framesize < 0) {
-    Serial.println("警告: 摄像头配置不可用，无法初始化视觉处理器");
-  } else {
-    // 获取摄像头分辨率
-    int framesize = sensor->status.framesize;
-    if (framesize >= 0 && framesize < sizeof(camera_resolution)/sizeof(camera_resolution[0])) {
-      int width = camera_resolution[framesize].width;
-      int height = camera_resolution[framesize].height;
-      
-      // 初始化视觉处理器
-      if (initVisionProcessor(width, height)) {
-        Serial.println("视觉处理器初始化成功");
-      } else {
-        Serial.println("视觉处理器初始化失败，将使用基本处理");
-      }
-      
-      // 初始化IR视觉处理器
-      if (initIRVisionProcessor(width, height)) {
-        Serial.println("IR视觉处理器初始化成功");
-      } else {
-        Serial.println("IR视觉处理器初始化失败");
-      }
-    } else {
-      Serial.printf("警告: 无效的framesize: %d\n", framesize);
-    }
-  }
-
-  // 8. 初始化性能监控变量 
+  // 6. 初始化性能监控变量 
   lastFPSCalculationTime = esp_timer_get_time();
   frameCount = 0;
 
-  // 9. 启动视频流服务器 (假设在核心1运行)
+  // 7. 启动视频流服务器
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
-  // 10. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
+  // 8. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
   createSerialMonitorTask(0); 
   createSystemMonitorTask(0);
 
@@ -226,7 +142,6 @@ void loop() {
     return;
   }
   static unsigned long lastMqttReconnectAttempt = 0;
-  static unsigned long lastNavigationUpdateTime = 0;
   unsigned long currentTime = millis();
 
   // 1. 处理MQTT连接和消息
@@ -240,33 +155,14 @@ void loop() {
     mqttClient.loop();
   }
 
-  // 2. 获取并处理摄像头帧（不再限制帧率，尽快处理）
+  // 2. 视频流处理
   if (cameraAvailable && !systemIsBusy) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
-            unsigned long t1 = millis();
-            processFrame(fb);
-            unsigned long t2 = millis();
-      #ifdef DEBUG
-            Serial.printf("[PROFILE] processFrame耗时: %lu ms\n", t2 - t1);
-      #endif
-      int currentBrightX = -1, currentBrightY = -1;
-      if (xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        currentBrightX = sharedBrightX;
-        currentBrightY = sharedBrightY;
-        xSemaphoreGive(frameAccessMutex);
-      }
-      if (currentTime - lastNavigationUpdateTime >= 300) {
-        lastNavigationUpdateTime = currentTime;
-        navigationStateMachine(fb, currentBrightX, currentBrightY);
-      }
+      // 视频流通过HTTP服务器自动处理
       esp_camera_fb_return(fb);
     }
-  } else if (!cameraAvailable) {
-    // 摄像头不可用时可执行其他无关操作
-  } else if (systemIsBusy) {
-    // 系统繁忙时可选处理
   }
 
-  delay(2); // 保持高帧率时建议用1ms
+  delay(2); // 保持高帧率
 }

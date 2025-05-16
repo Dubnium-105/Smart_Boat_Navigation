@@ -11,6 +11,13 @@ const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
+// 外部声明，用于获取中转服务器状态和系统状态变量
+extern bool useStreamServer;
+extern const char* streamServerUrl;
+extern void configureStreamServer(bool enable, const char* serverUrl);
+extern float currentFPS;
+extern volatile bool systemIsBusy;
+
 void setupMQTT() {
   randomSeed(esp_random()); // 使用ESP32硬件随机数生成器
   mqttClient.setServer(mqttServer, mqttPort);
@@ -18,6 +25,9 @@ void setupMQTT() {
   mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE); // 设置缓冲区大小
   Serial.println("MQTT客户端已配置");
 }
+
+// 函数声明
+void publishSystemStatus();
 
 bool mqtt_reconnect() {
   int attempts = 0;
@@ -29,18 +39,29 @@ bool mqtt_reconnect() {
     clientId += String(random(0xffff), HEX); 
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("已连接到MQTT服务器");
-      // 重新订阅主题
+      
+      // 订阅所有需要的主题
       mqttClient.subscribe("/motor"); // 订阅电机控制主题
-      // 构造JSON格式上线信息，包含WiFi状态
-      DynamicJsonDocument doc(256);
-      doc["msg"] = "ESP32-CAM已上线";
+      mqttClient.subscribe("/stream/config"); // 订阅视频流配置主题
+      
+      // 构造JSON格式上线信息，包含WiFi和系统状态
+      DynamicJsonDocument doc(512);
+      doc["msg"] = "ESP32-CAM已上线 - 手动控制模式";
+      doc["ip"] = WiFi.localIP().toString();
       doc["wifi_ssid"] = WiFi.SSID();
       doc["wifi_rssi"] = WiFi.RSSI();
       doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+      doc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
+      doc["mode"] = "manual_control"; // 指示当前为手动控制模式
+
       String infoStr;
       serializeJson(doc, infoStr);
       mqttClient.publish("/ESP32_info", infoStr.c_str());
-      mqttClient.publish("/motor/status", "电机控制已就绪");
+      mqttClient.publish("/motor/status", "电机控制已就绪 - 手动模式");
+      
+      // 发布系统状态
+      publishSystemStatus();
+      
       return true;
     } else {
       Serial.print("MQTT连接失败, rc=");
@@ -55,6 +76,23 @@ bool mqtt_reconnect() {
   return mqttClient.connected();
 }
 
+void publishSystemStatus() {
+  if (!mqttClient.connected()) return;
+  
+  DynamicJsonDocument doc(256);
+  doc["fps"] = currentFPS;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["busy"] = systemIsBusy;
+  doc["stream_server"] = useStreamServer;
+  if (useStreamServer) {
+    doc["stream_server_url"] = streamServerUrl;
+  }
+  
+  String statusStr;
+  serializeJson(doc, statusStr);
+  mqttClient.publish("/esp32/status", statusStr.c_str());
+}
+
 void loopMQTT() {
   if (!mqttClient.connected()) {
     // 如果未连接，则尝试重连（可以增加重连间隔逻辑）
@@ -62,6 +100,14 @@ void loopMQTT() {
   } else {
     // 处理MQTT消息
     mqttClient.loop();
+    
+    // 定期发布系统状态
+    static unsigned long lastStatusTime = 0;
+    unsigned long currentTime = millis();
+    if (currentTime - lastStatusTime > 5000) { // 每5秒更新一次状态
+      lastStatusTime = currentTime;
+      publishSystemStatus();
+    }
   }
 }
 
@@ -82,7 +128,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   // 处理电机控制消息
   if (strcmp(topic, "/motor") == 0) {
     // 使用ArduinoJson解析JSON数据
-    DynamicJsonDocument doc(256); // 使用动态内存分配的JsonDocument并指定容量
+    DynamicJsonDocument doc(256); // 使用DynamicJsonDocument替代JsonDocument
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error) {
@@ -92,20 +138,59 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
     
     // 检查是否包含电机速度参数
-    if (doc.containsKey("speedA") && doc.containsKey("speedB")) {
-       // 确保值是整数类型
-       if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
-            int speedA = doc["speedA"].as<int>();
-            int speedB = doc["speedB"].as<int>();
-            Serial.printf("通过MQTT设置电机速度: A=%d, B=%d\n", speedA, speedB);
-            motor_control(0, speedA); // 控制电机A
-            motor_control(1, speedB); // 控制电机B
-       } else {
-           Serial.println("JSON中的speedA或speedB类型错误，应为整数。");
-       }
+    if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
+       // 获取电机速度值
+       int speedA = doc["speedA"].as<int>();
+       int speedB = doc["speedB"].as<int>();
+       speedA = constrain(speedA, -100, 100); // 限制速度范围
+       speedB = constrain(speedB, -100, 100); // 限制速度范围
+       
+       Serial.printf("通过MQTT设置电机速度: A=%d, B=%d\n", speedA, speedB);
+       motor_control(0, speedA); // 控制电机A
+       motor_control(1, speedB); // 控制电机B
+       
+       // 发送电机状态确认
+       DynamicJsonDocument resDoc(128);
+       resDoc["speedA"] = speedA;
+       resDoc["speedB"] = speedB;
+       resDoc["timestamp"] = millis();
+       
+       String resStr;
+       serializeJson(resDoc, resStr);
+       mqttClient.publish("/motor/status", resStr.c_str());
     } else {
-        Serial.println("接收到的JSON缺少speedA或speedB字段。");
+       Serial.println("JSON中缺少speedA或speedB字段或类型错误，应为整数。");
     }
   }
-  // 可以添加对其他主题的处理逻辑
+  // 处理视频流配置消息
+  else if (strcmp(topic, "/stream/config") == 0) {
+    DynamicJsonDocument doc(256);
+    DeserializationError error = deserializeJson(doc, payload, length);
+    
+    if (error) {
+      Serial.print("JSON解析失败: ");
+      Serial.println(error.c_str());
+      return;
+    }
+    
+    if (doc["stream_server"].is<JsonObject>()) {
+      bool enable = doc["stream_server"]["enable"].as<bool>();
+      
+      if (doc["stream_server"]["url"].is<const char*>()) {
+        const char* url = doc["stream_server"]["url"];
+        configureStreamServer(enable, url);
+      } else {
+        configureStreamServer(enable, NULL); // 修复：传递NULL作为第二个参数
+      }
+      
+      // 发送配置确认
+      DynamicJsonDocument resDoc(256);
+      resDoc["stream_server"]["enable"] = useStreamServer;
+      resDoc["stream_server"]["url"] = streamServerUrl;
+      
+      String resStr;
+      serializeJson(resDoc, resStr);
+      mqttClient.publish("/stream/status", resStr.c_str());
+    }
+  }
 }

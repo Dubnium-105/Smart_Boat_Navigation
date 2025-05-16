@@ -5,14 +5,13 @@
 // 低优先级串口监控任务函数 - 分配到核心0，降低与视频流的冲突
 void serialMonitorTask(void *parameter) {
   unsigned long lastDiagTime = 0;
-  unsigned long lastBrightTime = 0;
-  const int BRIGHT_REFRESH_INTERVAL = 800;  // 增加刷新间隔到800ms，减少串口负担
+  const int DIAG_REFRESH_INTERVAL = 10000;  // 10秒更新一次诊断信息
 
   while (true) {
     unsigned long currentTime = millis();
 
     // 每10秒输出一次诊断信息
-    if (currentTime - lastDiagTime >= 10000) {
+    if (currentTime - lastDiagTime >= DIAG_REFRESH_INTERVAL) {
       // 检查是否系统繁忙，如果繁忙则跳过此次诊断
       if (!systemIsBusy) {
         Serial.printf("摄像头运行中，当前帧率: %.2f FPS\n", currentFPS);
@@ -28,32 +27,6 @@ void serialMonitorTask(void *parameter) {
           Serial.println("系统繁忙，跳过诊断信息输出。");
       }
       lastDiagTime = currentTime;
-    }
-
-    // 定期输出最亮点信息，间隔增大
-    if (currentTime - lastBrightTime >= BRIGHT_REFRESH_INTERVAL) {
-      // 只在系统不繁忙时尝试获取互斥锁
-      if (!systemIsBusy && xSemaphoreTake(frameAccessMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (newBrightPointAvailable) {
-          // 安全复制共享数据以减少锁持有时间
-          int local_x = sharedBrightX;
-          int local_y = sharedBrightY;
-          newBrightPointAvailable = false; // 标记为已处理
-          xSemaphoreGive(frameAccessMutex); // 尽快释放锁
-          
-          // 锁外处理数据，减少锁竞争
-          Serial.printf("[最亮点] x=%d, y=%d\n", local_x, local_y);
-          // 使用更小的显示尺寸, 确保坐标转换正确
-          print_ascii_frame(24, 12, local_x * 24 / 320, local_y * 12 / 240); 
-        } else {
-          xSemaphoreGive(frameAccessMutex); // 没有新数据也要释放锁
-        }
-      } else if (systemIsBusy) {
-          // Serial.println("系统繁忙，跳过最亮点信息输出。"); // 可选的调试信息
-      } else {
-          // Serial.println("未能获取帧访问锁，跳过最亮点信息输出。"); // 可选的调试信息
-      }
-      lastBrightTime = currentTime;
     }
 
     // 更长的延时，减轻CPU负担
