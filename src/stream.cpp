@@ -7,7 +7,7 @@
 #include <algorithm>     // 用于std::min函数
 
 // 中转服务器配置
-const char* streamServerUrl = "emqx.link2you.top/upload";  // 更改为您的中转服务器地址
+const char* streamServerUrl = "stream.link2you.top";  // 更改为您的中转服务器地址
 const int streamServerPort = 80;                                      // 更改为您的中转服务器端口
 bool useStreamServer = false;                                         // 控制是否启用中转服务器推送
 const int streamSendInterval = 500;                                    // 向中转服务器发送帧的时间间隔(毫秒)
