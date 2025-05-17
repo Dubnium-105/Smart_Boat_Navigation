@@ -8,7 +8,7 @@
 
 // 中转服务器配置
 const char* streamServerUrl = "http://stream.link2you.top/api/stream"; // 云服务器接收API
-const int streamSendInterval = 100;
+const int streamSendInterval = 50;
 unsigned long lastStreamSendTime = 0;
 
 // MJPEG流处理所需常量

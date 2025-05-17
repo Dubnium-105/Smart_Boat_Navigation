@@ -26,7 +26,7 @@ bool setupCamera() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;  // 20MHz时钟频率
 
-  config.frame_size = FRAMESIZE_VGA; 
+  config.frame_size = FRAMESIZE_SVGA; 
   //config.pixel_format = PIXFORMAT_GRAYSCALE;  // 灰度图格式，极大减小图片体积
   config.pixel_format = PIXFORMAT_JPEG;  // JPEG格式（如需彩色可恢复此行）
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // 帧缓冲区空闲时捕获，更稳定
