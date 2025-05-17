@@ -6,6 +6,7 @@
  * - 启动视频流服务器并推送至中转服务器
  * - 创建后台任务 (串口监控、系统监控)
  * - 主循环处理摄像头帧和MQTT消息
+ * 推送master
  */
 #include <Arduino.h>
 #include "esp_camera.h"
