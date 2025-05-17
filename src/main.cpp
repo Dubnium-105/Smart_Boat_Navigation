@@ -21,49 +21,26 @@
 #include "camera_setup.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
-// #include "motor_control.h"
-// #include "tasks.h" // 包含任务创建函数和外部声明
+#include "motor_control.h"
+#include "tasks.h"
+#include "navigation.h"
+#include "find_brightest.h"
 
 // --- 声明外部函数和变量 ---
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
-// extern float currentFPS;               // 来自 stream.cpp
-// extern unsigned long frameCount;       // 来自 stream.cpp
-// extern unsigned long lastFPSCalculationTime; // 来自 stream.cpp
 extern void streamLoop(); // 来自 stream.cpp，主动推流函数
 
-// 摄像头分辨率结构体声明
-// struct CustomCameraResolution {
-//     int width;
-//     int height;
-// };
-
-// 摄像头分辨率映射表 - 改名以避免与ESP32 Camera API的定义冲突
-// static const CustomCameraResolution camera_resolution[] = {
-//     { 96, 96 },     // FRAMESIZE_96X96,    0
-//     { 160, 120 },   // FRAMESIZE_QQVGA,    1
-//     { 176, 144 },   // FRAMESIZE_QCIF,     2
-//     { 240, 176 },   // FRAMESIZE_HQVGA,    3
-//     { 240, 240 },   // FRAMESIZE_240X240,  4
-//     { 320, 240 },   // FRAMESIZE_QVGA,     5
-//     { 400, 296 },   // FRAMESIZE_CIF,      6
-//     { 480, 320 },   // FRAMESIZE_HVGA,     7
-//     { 640, 480 },   // FRAMESIZE_VGA,      8
-//     { 800, 600 },   // FRAMESIZE_SVGA,     9
-//     { 1024, 768 },  // FRAMESIZE_XGA,      10
-//     { 1280, 720 },  // FRAMESIZE_HD,       11
-//     { 1280, 1024 }, // FRAMESIZE_SXGA,     12
-//     { 1600, 1200 }, // FRAMESIZE_UXGA,     13
-// };
-
-// 获取摄像头配置的函数
-// sensor_t* sensor_get_config() {
-//     return esp_camera_sensor_get();
-// }
+// 前置声明（解决未定义标识符编译错误）
+void setup_ir_sensors();
+void setup_mpu();
 
 // --- 全局共享变量和同步原语 ---
-// SemaphoreHandle_t frameAccessMutex = NULL;
- volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitorTask更新)
+SemaphoreHandle_t frameAccessMutex = NULL;
+volatile int sharedBrightX = -1;
+volatile int sharedBrightY = -1;
+volatile bool newBrightPointAvailable = false;
+volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitorTask更新)
 bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
 
 // --- Arduino Setup ---
@@ -75,12 +52,12 @@ void setup() {
   Serial.println("====================================");
 
   // 1. 创建互斥锁 (必须在任务使用前创建)
-  // frameAccessMutex = xSemaphoreCreateMutex();
-  // if (frameAccessMutex == NULL) {
-  //   Serial.println("错误: 无法创建帧访问互斥锁! 重启...");
-  //   delay(1000);
-  //   ESP.restart();
-  // }
+  frameAccessMutex = xSemaphoreCreateMutex();
+  if (frameAccessMutex == NULL) {
+    Serial.println("错误: 无法创建帧访问互斥锁! 重启...");
+    delay(1000);
+    ESP.restart();
+  }
   
   // 2. 初始化摄像头 (增加重试机制)
   const int maxCameraRetries = 3;
@@ -99,8 +76,10 @@ void setup() {
     Serial.println("摄像头初始化失败，启用降级模式：仅WiFi和MQTT功能");
   }
 
-  // 3. 初始化电机
-  // setup_motors();
+  // 3. 初始化红外传感器、MPU、电机
+  //setup_ir_sensors();
+  //setup_mpu();
+  setup_motors();
 
   // 4. 连接WiFi
   if (!connectWiFi()) {
@@ -116,17 +95,16 @@ void setup() {
       mqtt_reconnect(); 
   }
 
-  // 6. 初始化性能监控变量 
-  // lastFPSCalculationTime = esp_timer_get_time();
-  // frameCount = 0;
+  // 6. 初始化导航系统
+  initNavigation();
 
   // 7. 启动视频流服务器
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
   // 8. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
-  // createSerialMonitorTask(0); 
-  // createSystemMonitorTask(0);
+  createSerialMonitorTask(0); 
+  createSystemMonitorTask(0);
 
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
@@ -136,10 +114,62 @@ void setup() {
 
 // --- Arduino Loop ---
 void loop() {
-  // 只处理HTTP推流，不再处理MQTT图片
-  if (cameraAvailable) {
-    streamLoop(); // HTTP推流到服务器
+  static unsigned long lastMqttReconnect = 0;
+  static unsigned long lastSensorDataSend = 0;
+  static unsigned long lastInterruptCheck = 0;
+  unsigned long now = millis();
+
+  // 检查WiFi连接状态
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi连接断开，尝试重连");
+    connectWiFi();
+    return;
   }
-  // 可选: 延时以防止过高帧率导致CPU占用过高
+
+  // 检查MQTT连接状态
+  if (!mqttClient.connected()) {
+    if (now - lastMqttReconnect > 5000) {
+      lastMqttReconnect = now;
+      mqtt_reconnect();
+    }
+  } else {
+    loopMQTT();
+  }
+
+  // 检查是否有新最亮点
+  bool shouldProcess = false;
+  if (newBrightPointAvailable) {
+    shouldProcess = true;
+    newBrightPointAvailable = false;
+  }
+
+  // 处理摄像头帧和导航
+  if (cameraAvailable) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+      int bx = -1, by = -1;
+      find_brightest(fb->buf, fb->width, fb->height, bx, by);
+      sharedBrightX = bx;
+      sharedBrightY = by;
+      newBrightPointAvailable = true;
+      navigationStateMachine(fb, bx, by);
+      esp_camera_fb_return(fb);
+    }
+    streamLoop(); // 保持视频流
+  }
+
+  // 定期发送传感器数据
+  if (now - lastSensorDataSend > 100) {
+    lastSensorDataSend = now;
+    // 可选: 发送红外/MPU等传感器数据到MQTT
+    // send_sensor_data();
+  }
+
+  // 周期性清除并重新读取中断状态，防止中断标志丢失
+  if (now - lastInterruptCheck > 1000) {
+    lastInterruptCheck = now;
+    // ...如有中断相关处理可补充...
+  }
+
   delay(2);
 }
