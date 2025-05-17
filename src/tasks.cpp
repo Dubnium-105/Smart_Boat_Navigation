@@ -5,7 +5,7 @@
 // 低优先级串口监控任务函数 - 分配到核心0，降低与视频流的冲突
 void serialMonitorTask(void *parameter) {
   unsigned long lastDiagTime = 0;
-  const int DIAG_REFRESH_INTERVAL = 10000;  // 10秒更新一次诊断信息
+  const int DIAG_REFRESH_INTERVAL = 5000;  // 5秒更新一次诊断信息（原为10秒）
 
   while (true) {
     unsigned long currentTime = millis();
@@ -17,7 +17,7 @@ void serialMonitorTask(void *parameter) {
         Serial.printf("摄像头运行中，当前帧率: %.2f FPS\n", currentFPS);
         // 确保WiFi已连接再获取IP
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("当前IP: %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("当前IP: http://%s\n", WiFi.localIP().toString().c_str());
         } else {
             Serial.println("WiFi未连接");
         }

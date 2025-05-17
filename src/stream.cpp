@@ -8,7 +8,7 @@
 
 // 中转服务器配置
 const char* streamServerUrl = "http://stream.link2you.top/api/stream"; // 云服务器接收API
-const int streamSendInterval = 33; // 约30fps, 33ms一帧
+const int streamSendInterval = 100;
 unsigned long lastStreamSendTime = 0;
 
 // MJPEG流处理所需常量
@@ -25,17 +25,42 @@ bool useStreamServer = false; // 是否将视频流发送到中转服务器
 
 // 将原loop函数重命名为streamLoop，避免与Arduino主循环冲突
 void streamLoop() {
+  static unsigned long lastLogTime = 0;
   unsigned long now = millis();
   if (now - lastStreamSendTime >= streamSendInterval) {
+    unsigned long t0 = millis();
     camera_fb_t *fb = esp_camera_fb_get();
+    unsigned long t1 = millis();
     if (fb) {
       HTTPClient http;
       http.begin(streamServerUrl);
       http.addHeader("Content-Type", "image/jpeg");
       http.addHeader("X-ESP32-ID", WiFi.macAddress());
       int httpResponseCode = http.POST(fb->buf, fb->len);
+      unsigned long t2 = millis();
+      // 每5秒输出一次推流信息和耗时
+      if (now - lastLogTime > 5000) {
+        Serial.printf("[推流] 帧大小: %d bytes, 采集: %lums, 上传: %lums, 帧头: %02X %02X %02X %02X\n", fb->len, t1-t0, t2-t1, fb->buf[0], fb->buf[1], fb->buf[2], fb->buf[3]);
+        if (httpResponseCode > 0) {
+          Serial.printf("[推流] 上传图片成功，响应码: %d\n", httpResponseCode);
+        } else {
+          Serial.printf("[推流] 上传图片失败，错误: %s\n", http.errorToString(httpResponseCode).c_str());
+        }
+        // 输出板子性能占用情况
+        Serial.printf("[系统] Free Heap: %u bytes, Min Free Heap: %u bytes", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+        #ifdef BOARD_HAS_PSRAM
+        Serial.printf(", PSRAM: %u bytes", ESP.getFreePsram());
+        #endif
+        Serial.println();
+        lastLogTime = now;
+      }
       http.end();
       esp_camera_fb_return(fb);
+    } else {
+      if (now - lastLogTime > 5000) {
+        Serial.println("[推流] 获取摄像头帧失败");
+        lastLogTime = now;
+      }
     }
     lastStreamSendTime = now;
   }

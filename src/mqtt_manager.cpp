@@ -6,7 +6,7 @@
 // MQTT配置
 const char* mqttServer = "emqx.link2you.top";
 const int mqttPort = 1883;
-const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
+const int MAX_MQTT_PACKET_SIZE = 102400; // 增加缓冲区以防大数据包
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
