@@ -35,30 +35,6 @@ extern float currentFPS;               // 来自 stream.cpp
 extern unsigned long frameCount;       // 来自 stream.cpp
 extern unsigned long lastFPSCalculationTime; // 来自 stream.cpp
 
-// 摄像头分辨率结构体声明
-struct CustomCameraResolution {
-    int width;
-    int height;
-};
-
-// 摄像头分辨率映射表 - 改名以避免与ESP32 Camera API的定义冲突
-static const CustomCameraResolution camera_resolution[] = {
-    { 96, 96 },     // FRAMESIZE_96X96,    0
-    { 160, 120 },   // FRAMESIZE_QQVGA,    1
-    { 176, 144 },   // FRAMESIZE_QCIF,     2
-    { 240, 176 },   // FRAMESIZE_HQVGA,    3
-    { 240, 240 },   // FRAMESIZE_240X240,  4
-    { 320, 240 },   // FRAMESIZE_QVGA,     5
-    { 400, 296 },   // FRAMESIZE_CIF,      6
-    { 480, 320 },   // FRAMESIZE_HVGA,     7
-    { 640, 480 },   // FRAMESIZE_VGA,      8
-    { 800, 600 },   // FRAMESIZE_SVGA,     9
-    { 1024, 768 },  // FRAMESIZE_XGA,      10
-    { 1280, 720 },  // FRAMESIZE_HD,       11
-    { 1280, 1024 }, // FRAMESIZE_SXGA,     12
-    { 1600, 1200 }, // FRAMESIZE_UXGA,     13
-};
-
 // 获取摄像头配置的函数
 sensor_t* sensor_get_config() {
     return esp_camera_sensor_get();
