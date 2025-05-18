@@ -103,14 +103,14 @@ esp_err_t index_handler(httpd_req_t *req) {
     "<option value='HQVGA'" + String(strcmp(sizeStr,"HQVGA")==0?" selected":"") + ">240x176</option>"
     "<option value='240X240'" + String(strcmp(sizeStr,"240X240")==0?" selected":"") + ">240x240</option>"
     "<option value='QVGA'" + String(strcmp(sizeStr,"QVGA")==0?" selected":"") + ">320x240</option>"
-    "<option value='CIF'" + String(strcmp(sizeStr,"CIF")==0?" selected":"") + ">352x288</option>"
+    "<option value='CIF'" + String(strcmp(sizeStr,"CIF")==0?" selected":"") + ">352x288(60FPS)</option>"
     "<option value='HVGA'" + String(strcmp(sizeStr,"HVGA")==0?" selected":"") + ">480x320</option>"
     "<option value='VGA'" + String(strcmp(sizeStr,"VGA")==0?" selected":"") + ">640x480</option>"
     "<option value='SVGA'" + String(strcmp(sizeStr,"SVGA")==0?" selected":"") + ">800x600</option>"
     "<option value='XGA'" + String(strcmp(sizeStr,"XGA")==0?" selected":"") + ">1024x768</option>"
     "<option value='HD'" + String(strcmp(sizeStr,"HD")==0?" selected":"") + ">1280x720</option>"
     "<option value='SXGA'" + String(strcmp(sizeStr,"SXGA")==0?" selected":"") + ">1280x1024</option>"
-    "<option value='UXGA'" + String(strcmp(sizeStr,"UXGA")==0?" selected":"") + ">1600x1200</option>"
+    "<option value='UXGA'" + String(strcmp(sizeStr,"UXGA")==0?" selected":"") + ">1600x1200(15FPS)</option>"
     "</select>"
     "<label for='quality'>画质:</label>"
     "<input id='quality' type='number' min='10' max='63' value='" + String(quality) + "' style='width:50px;'>"
@@ -169,6 +169,7 @@ esp_err_t set_quality_handler(httpd_req_t *req) {
     char param[20];
     httpd_req_get_url_query_str(req, buf, buf_len);
     sensor_t *s = esp_camera_sensor_get();
+    // 删除xclk相关后端处理逻辑
     // 分辨率
     if (httpd_query_key_value(buf, "size", param, sizeof(param)) == ESP_OK) {
       if (strcmp(param, "96X96") == 0) s->set_framesize(s, FRAMESIZE_96X96);
@@ -205,6 +206,7 @@ esp_err_t set_quality_handler(httpd_req_t *req) {
       if (c >= -2 && c <= 2) s->set_contrast(s, c);
       Serial.println(getTimestamp() + String("设置对比度: ") + c);
     }
+    // ...不再处理xclk...
   }
   httpd_resp_sendstr(req, "ok");
   return ESP_OK;

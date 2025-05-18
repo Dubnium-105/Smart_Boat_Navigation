@@ -3,6 +3,8 @@
 
 #include "esp_camera.h"
 
+extern camera_config_t camera_config_global;
+
 /**
  * @brief 初始化ESP32摄像头。
  * 

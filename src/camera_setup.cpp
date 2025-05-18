@@ -2,10 +2,11 @@
 #include "esp_camera_pins.h" // 包含摄像头引脚定义
 #include <Arduino.h>
 
+camera_config_t camera_config_global; // 全局摄像头配置
+
 bool setupCamera() {
   Serial.println("开始初始化摄像头...");
-  
-  camera_config_t config;
+  camera_config_t &config = camera_config_global;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;

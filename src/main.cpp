@@ -31,6 +31,7 @@ bool ENABLE_MQTT = true;        // 是否启用MQTT
 // --- 声明外部函数和变量 ---
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
+extern void streamLoop(); // 声明streamLoop函数，来自stream.cpp
 // 获取摄像头配置的函数
 sensor_t* sensor_get_config() {
     return esp_camera_sensor_get();
@@ -39,6 +40,8 @@ sensor_t* sensor_get_config() {
 // --- 全局共享变量和同步原语 ---
 SemaphoreHandle_t frameAccessMutex = nullptr;
 bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
+TaskHandle_t cameraTaskHandle = NULL;
+void cameraTask(void *pvParameters);
 
 // --- Arduino Setup ---
 void setup() {
@@ -101,6 +104,24 @@ void setup() {
       Serial.println(" 查看视频流");
   }
   Serial.println("====================================");
+
+  // 启动摄像头推流任务（绑定core0）
+  xTaskCreatePinnedToCore(
+    cameraTask,         // 任务函数
+    "CameraTask",      // 名称
+    8192,              // 堆栈大小
+    NULL,              // 参数
+    2,                 // 优先级
+    &cameraTaskHandle, // 任务句柄
+    0                  // 绑定core0
+  );
+}
+
+void cameraTask(void *pvParameters) {
+  while (1) {
+    streamLoop(); // 摄像头推流主循环
+    vTaskDelay(1); // 防止死循环卡死
+  }
 }
 
 // --- Arduino Loop ---
@@ -122,14 +143,6 @@ void loop() {
     mqttClient.loop();
   }
 
-  // 2. 视频流处理
-  if (cameraAvailable) {
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb) {
-      // 视频流通过HTTP服务器自动处理
-      esp_camera_fb_return(fb);
-    }
-  }
-
+  // loop() 不再采集摄像头帧，避免与cameraTask冲突
   delay(2); // 保持高帧率
 }
