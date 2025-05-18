@@ -26,10 +26,10 @@ bool setupCamera() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;  // 20MHz时钟频率
   config.frame_size = FRAMESIZE_SXGA;
-  config.pixel_format = PIXFORMAT_GRAYSCALE;  // 灰度图格式
+  config.pixel_format = PIXFORMAT_JPEG;  // JPEG格式
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // 帧缓冲区空闲时捕获，更稳定
   config.fb_location = CAMERA_FB_IN_PSRAM;    // 优先使用PSRAM存储帧
-  config.jpeg_quality = 30;  // JPEG质量 (影响灰度图处理吗？可能不影响，但保留)
+  config.jpeg_quality = 20;  // JPEG质量 数值越大压缩越大，越小画质越好
   config.fb_count = 1;       // 使用单个帧缓冲，减少内存占用和延迟
 
   // PSRAM检测及配置
@@ -41,7 +41,7 @@ bool setupCamera() {
   } else {
      Serial.println("找到PSRAM，已启用。");
      // 如果有PSRAM，可以考虑使用更大的fb_count=2以提高帧率，但需测试稳定性
-     // config.fb_count = 2; 
+     config.fb_count = 3; 
   }
 
   // 初始化摄像头
@@ -67,9 +67,8 @@ bool setupCamera() {
   s->set_saturation(s, 0);      // 标准饱和度 (灰度图可能无效)
   s->set_sharpness(s, 1);       // 标准锐度
   s->set_denoise(s, 1);         // 开启降噪
-  s->set_quality(s, 60);        // 图像质量 (影响JPEG压缩，对灰度图处理影响较小)
-  s->set_special_effect(s, 0);  // 无特殊效果
-  s->set_vflip(s, 1);           // 垂直翻转图像
+
+  s->set_vflip(s, 0);           // 垂直翻转图像
   s->set_hmirror(s, 0);         // 不水平镜像
   
   // 自动控制设置
@@ -82,7 +81,7 @@ bool setupCamera() {
   
   
   Serial.println("摄像头传感器参数配置完成。");
-  delay(300); // 等待摄像头稳定
+  delay(200); // 等待摄像头稳定
   return true;
 }
 
@@ -98,11 +97,23 @@ void printCameraSettings() {
   // 打印帧大小
   const char* framesize_str;
   switch(s->status.framesize) {
-    case FRAMESIZE_QQVGA: framesize_str = "160x120 (QQVGA)"; break;
-    case FRAMESIZE_QVGA:  framesize_str = "320x240 (QVGA)"; break;
-    case FRAMESIZE_VGA:   framesize_str = "640x480 (VGA)"; break;
-    // 添加其他支持的分辨率
-    default: framesize_str = "其他"; break;
+    case FRAMESIZE_QQVGA:    framesize_str = "160x120 (QQVGA)"; break;
+    case FRAMESIZE_QCIF:     framesize_str = "176x144 (QCIF)"; break;
+    case FRAMESIZE_HQVGA:    framesize_str = "240x176 (HQVGA)"; break;
+    case FRAMESIZE_QVGA:     framesize_str = "320x240 (QVGA)"; break;
+    case FRAMESIZE_CIF:      framesize_str = "400x296 (CIF)"; break;
+    case FRAMESIZE_VGA:      framesize_str = "640x480 (VGA)"; break;
+    case FRAMESIZE_SVGA:     framesize_str = "800x600 (SVGA)"; break;
+    case FRAMESIZE_XGA:      framesize_str = "1024x768 (XGA)"; break;
+    case FRAMESIZE_SXGA:     framesize_str = "1280x1024 (SXGA)"; break;
+    case FRAMESIZE_UXGA:     framesize_str = "1600x1200 (UXGA)"; break;
+    case FRAMESIZE_QXGA:     framesize_str = "2048x1536 (QXGA)"; break;
+    case FRAMESIZE_QHD:      framesize_str = "2560x1440 (QHD)"; break;
+    case FRAMESIZE_WQXGA:    framesize_str = "2560x1600 (WQXGA)"; break;
+    case FRAMESIZE_P_FHD:    framesize_str = "1088x1920 (P_FHD)"; break;
+    case FRAMESIZE_FHD:      framesize_str = "1920x1080 (FHD)"; break;
+    case FRAMESIZE_QSXGA:    framesize_str = "2560x1920 (QSXGA)"; break;
+    default:                 framesize_str = "其他"; break;
   }
   Serial.printf("分辨率: %s (%d)\n", framesize_str, s->status.framesize);
   

@@ -31,10 +31,6 @@ bool ENABLE_MQTT = true;        // 是否启用MQTT
 // --- 声明外部函数和变量 ---
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
-extern float currentFPS;               // 来自 stream.cpp
-extern unsigned long frameCount;       // 来自 stream.cpp
-extern unsigned long lastFPSCalculationTime; // 来自 stream.cpp
-
 // 获取摄像头配置的函数
 sensor_t* sensor_get_config() {
     return esp_camera_sensor_get();
@@ -93,11 +89,6 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
       mqtt_reconnect(); 
   }
-
-  // 6. 初始化性能监控变量 
-  lastFPSCalculationTime = esp_timer_get_time();
-  frameCount = 0;
-
   // 7. 启动视频流服务器
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
