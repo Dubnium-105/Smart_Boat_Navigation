@@ -21,19 +21,34 @@ httpd_handle_t stream_httpd = NULL;
 float currentFPS = 0;
 unsigned long frameCount = 0;
 unsigned long lastFPSCalculationTime = 0;
+unsigned long lastLogTime = 0; // 记录上次日志输出时间
 bool useStreamServer = false; // 是否将视频流发送到中转服务器
 
 // 将原loop函数重命名为streamLoop，避免与Arduino主循环冲突
 void streamLoop() {
   unsigned long now = millis();
   if (now - lastStreamSendTime >= streamSendInterval) {
+    unsigned long t0 = millis();
     camera_fb_t *fb = esp_camera_fb_get();
+    unsigned long t1 = millis();
     if (fb) {
       HTTPClient http;
       http.begin(streamServerUrl);
       http.addHeader("Content-Type", "image/jpeg");
       http.addHeader("X-ESP32-ID", WiFi.macAddress());
       int httpResponseCode = http.POST(fb->buf, fb->len);
+      unsigned long t2 = millis();
+      // 每5秒输出一次推流信息和耗时
+      if (now - lastLogTime > 5000) {
+        Serial.printf("[推流] 帧大小: %d bytes, 采集: %lums, 上传: %lums\n", fb->len, t1-t0, t2-t1);
+        if (httpResponseCode > 0) {
+          Serial.printf("[推流] 上传图片成功，响应码: %d\n", httpResponseCode);
+        } else {
+          Serial.printf("[推流] 上传图片失败，错误: %s\n", http.errorToString(httpResponseCode).c_str());
+        }
+        Serial.println();
+        lastLogTime = now;
+      }
       http.end();
       esp_camera_fb_return(fb);
     }
