@@ -1,12 +1,6 @@
 #include "wifi_manager.h"
 #include <Arduino.h>
 
-// 固定IP地址定义
-IPAddress staticIP(192, 168, 31, 170);  // 固定IP地址
-IPAddress gateway(192, 168, 31, 1);     // 网关
-IPAddress subnet(255, 255, 255, 0);     // 子网掩码
-IPAddress dns(8, 8, 8, 8);              // DNS服务器
-
 // WiFi连接配置
 struct WifiCredential {
   const char* ssid;

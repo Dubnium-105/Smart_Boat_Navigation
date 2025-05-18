@@ -15,7 +15,6 @@ PubSubClient mqttClient(espClient);
 extern bool useStreamServer;
 extern const char* streamServerUrl;
 extern float currentFPS;
-extern volatile bool systemIsBusy;
 
 // 声明来自stream.cpp的函数
 extern void configureStreamServer(bool enable, const char* serverUrl);
@@ -84,7 +83,6 @@ void publishSystemStatus() {
   DynamicJsonDocument doc(256);
   doc["fps"] = currentFPS;
   doc["ip"] = WiFi.localIP().toString();
-  doc["busy"] = systemIsBusy;
   doc["stream_server"] = useStreamServer;
   if (useStreamServer) {
     doc["stream_server_url"] = streamServerUrl;

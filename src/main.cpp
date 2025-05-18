@@ -22,8 +22,12 @@
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "motor_control.h"
-#include "tasks.h" // 包含任务创建函数和外部声明
-
+// --- 各模块功能开关 ---
+bool ENABLE_CAMERA = true;      // 是否启用摄像头
+bool ENABLE_MOTOR = true;       // 是否启用电机控制
+bool ENABLE_WIFI = true;        // 是否启用WiFi
+bool ENABLE_MQTT = true;        // 是否启用MQTT
+// 可根据需要添加更多模块开关
 // --- 声明外部函数和变量 ---
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
@@ -61,8 +65,7 @@ sensor_t* sensor_get_config() {
 }
 
 // --- 全局共享变量和同步原语 ---
-SemaphoreHandle_t frameAccessMutex = NULL;
-volatile bool systemIsBusy = false;      // 系统繁忙标志 (由systemMonitorTask更新)
+SemaphoreHandle_t frameAccessMutex = nullptr;
 bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
 
 // --- Arduino Setup ---
@@ -123,10 +126,6 @@ void setup() {
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
-  // 8. 创建后台任务 (固定到核心0以减少对摄像头/流的影响)
-  createSerialMonitorTask(0); 
-  createSystemMonitorTask(0);
-
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
   if (WiFi.status() == WL_CONNECTED) {
@@ -157,7 +156,7 @@ void loop() {
   }
 
   // 2. 视频流处理
-  if (cameraAvailable && !systemIsBusy) {
+  if (cameraAvailable) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
       // 视频流通过HTTP服务器自动处理
