@@ -45,7 +45,11 @@ bool mqtt_reconnect() {
       // 订阅所有需要的主题
       mqttClient.subscribe("/motor"); // 订阅电机控制主题
       mqttClient.subscribe("/stream/config"); // 订阅视频流配置主题
+      mqttClient.subscribe("/restart");
+      mqttClient.subscribe("/ota"); // 订阅OTA升级主题
+      mqttClient.subscribe("/check_mqtt"); 
       
+
       // 构造JSON格式上线信息，包含WiFi和系统状态
       DynamicJsonDocument doc(512);
       doc["msg"] = "ESP32-CAM已上线 - 手动控制模式";

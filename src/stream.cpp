@@ -68,8 +68,49 @@ void configureStreamServer(bool enable, const char* serverUrl) {
 
 // 启动简单的摄像头流服务器
 void startSimpleCameraStream() {
-  // 实现摄像头流服务器启动逻辑
-  // 这个函数在main.cpp中被调用
   Serial.println("启动视频流服务器...");
-  // 在这里可以添加启动HTTP服务器的具体实现
+  if (stream_httpd) {
+    Serial.println("HTTP流服务器已在运行");
+    return;
+  }
+
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.server_port = 80; // 默认80端口
+  config.max_uri_handlers = 8;
+  config.stack_size = 8192;
+
+  // MJPEG流处理handler
+  httpd_uri_t stream_uri = {
+    .uri       = "/stream",
+    .method    = HTTP_GET,
+    .handler   = [](httpd_req_t *req) -> esp_err_t {
+      // 设置响应头
+      httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+      char part_buf[64];
+      while (true) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) {
+          Serial.println("获取摄像头帧失败");
+          continue;
+        }
+        size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART, fb->len);
+        httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+        httpd_resp_send_chunk(req, part_buf, hlen);
+        httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        esp_camera_fb_return(fb);
+        // 控制帧率
+        vTaskDelay(33 / portTICK_PERIOD_MS); // 约30fps
+      }
+      httpd_resp_send_chunk(req, NULL, 0);
+      return ESP_OK;
+    },
+    .user_ctx  = NULL
+  };
+
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+    Serial.println("本地HTTP流服务已启动: http://<板子IP>/stream");
+  } else {
+    Serial.println("启动本地HTTP流服务失败");
+  }
 }
