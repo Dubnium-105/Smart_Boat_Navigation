@@ -2,6 +2,7 @@
 #include "motor_control.h" // 需要调用电机控制函数
 #include <ArduinoJson.h>   // JSON处理库
 #include <esp_random.h>    // 用于生成随机客户端ID
+#include <HTTPUpdate.h>
 
 // MQTT配置
 const char* mqttServer = "emqx.link2you.top";
@@ -192,5 +193,49 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       serializeJson(resDoc, resStr);
       mqttClient.publish("/stream/status", resStr.c_str());
     }
+  }
+  // 处理MQTT连接检查
+  else if (strcmp(topic, "/check_mqtt") == 0) {
+    // 简单回复，表示在线
+    mqttClient.publish("/check_mqtt_reply", "pong");
+    Serial.println("收到/check_mqtt，已回复/pong");
+  }
+  // 处理OTA升级命令
+  else if (strcmp(topic, "/ota") == 0) {
+    String otaUrl;
+    if (length < 200) {
+      otaUrl = String((const char*)payload, length);
+      otaUrl.trim();
+      Serial.printf("收到OTA升级命令，URL: %s\n", otaUrl.c_str());
+      mqttClient.publish("/OTA_info", (String("开始OTA升级，URL:") + otaUrl).c_str());
+      // 真正的OTA升级流程
+      WiFiClient otaClient;
+      t_httpUpdate_return ret = httpUpdate.update(otaClient, otaUrl);
+      switch (ret) {
+        case HTTP_UPDATE_FAILED:
+          mqttClient.publish("/OTA_info", (String("OTA失败: ") + httpUpdate.getLastErrorString()).c_str());
+          Serial.printf("OTA失败: %s\n", httpUpdate.getLastErrorString().c_str());
+          break;
+        case HTTP_UPDATE_NO_UPDATES:
+          mqttClient.publish("/OTA_info", "OTA无可用更新");
+          Serial.println("OTA无可用更新");
+          break;
+        case HTTP_UPDATE_OK:
+          mqttClient.publish("/OTA_info", "OTA升级成功，正在重启...");
+          Serial.println("OTA升级成功，正在重启...");
+          delay(1000);
+          ESP.restart();
+          break;
+      }
+    } else {
+      mqttClient.publish("/OTA_info", "OTA URL过长，忽略");
+    }
+  }
+  // 处理重启命令
+  else if (strcmp(topic, "/restart") == 0) {
+    Serial.println("收到重启命令，准备重启...");
+    mqttClient.publish("/OTA_info", "即将重启ESP32");
+    delay(1000);
+    ESP.restart();
   }
 }
