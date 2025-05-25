@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <title>智能船控制面板</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #e0e7ff 0%, #f4f6fa 100%); margin: 0; padding: 0; }
+        .container { max-width: 520px; margin: 32px auto; background: #fff; border-radius: 18px; box-shadow: 0 4px 24px #b3b8d0; padding: 28px 18px 24px 18px; }
+        h2 { text-align: center; color: #2c3e50; letter-spacing: 2px; font-weight: 600; margin-bottom: 18px; }
+        .controls { display: flex; flex-direction: column; gap: 18px; }
+        .slider-row { display: flex; flex-direction: row; justify-content: space-between; gap: 32px; align-items: center; }
+        .slider-group { display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 90px; background: #f6f8fc; border-radius: 10px; padding: 12px 8px; box-shadow: 0 1px 4px #e0e7ff; }
+        .slider-group label { width: auto; margin-bottom: 4px; font-size: 16px; color: #34495e; font-weight: 500; }
+        .slider-group input[type=range] {
+            writing-mode: bt-lr;
+            appearance: slider-vertical;
+            -webkit-appearance: slider-vertical;
+            width: 18px; /* 更细的托条 */
+            height: 160px;
+            margin: 0 0 8px 0;
+            background: linear-gradient(180deg, #dbeafe 0%, #f1f5f9 100%);
+            border-radius: 8px;
+        }
+        .slider-group span { font-size: 18px; color: #2563eb; font-weight: bold; }
+        .slider-center-camera { display: flex; flex-direction: row; align-items: flex-end; justify-content: center; gap: 32px; width: 100%; }
+        .slider-center-camera .slider-group { margin: 0; }
+        .slider-center-camera .camera-view { margin: 0; padding: 0 12px; box-shadow: none; background: none; }
+        .btn-row { display: flex; flex-direction: row; gap: 18px; justify-content: center; }
+        .btn { padding: 5px 14px; font-size: 13px; border: none; border-radius: 6px; background: linear-gradient(90deg, #60a5fa 0%, #38bdf8 100%); color: #fff; font-weight: 500; box-shadow: 0 2px 8px #dbeafe; cursor: pointer; transition: background 0.2s, box-shadow 0.2s; }
+        .btn:hover { background: linear-gradient(90deg, #2563eb 0%, #0ea5e9 100%); box-shadow: 0 4px 16px #bae6fd; }
+        .camera-view { background: #f6f8fc; border-radius: 12px; padding: 12px 0 18px 0; box-shadow: 0 1px 4px #e0e7ff; display: flex; flex-direction: column; align-items: center; }
+        .camera-view h3 { display: none; }
+        #camera-img { width: 220px; height: 165px; border-radius: 8px; box-shadow: 0 2px 8px #dbeafe; background: #e0e7ff; object-fit: cover; }
+        .log-area { margin-top: 18px; height: 80px; font-size: 13px; background: #f1f5f9; border-radius: 8px; padding: 8px 10px; color: #334155; overflow-y: auto; box-shadow: 0 1px 4px #e0e7ff; }
+        @media (max-width: 800px) {
+          .container { max-width: 100vw; padding: 8px; }
+          .controls { flex-direction: column; gap: 16px; }
+          .camera-view { margin-top: 16px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>智能船控制面板</h2>
+    <div class="controls">
+        <div class="slider-center-camera">
+            <div class="slider-group">
+                <label for="motor1Slider">电机1</label>
+                <input type="range" id="motor1Slider" min="-100" max="100" value="0" oninput="updateMotorSpeed(1, this.value)">
+                <span id="motor1Value">0</span>
+            </div>
+            <div class="camera-view">
+                <img id="camera-img" src="" alt="Camera Stream">
+                <button class="btn" style="margin-top:8px;" onclick="refreshCamera()">刷新画面</button>
+            </div>
+            <div class="slider-group">
+                <label for="motor2Slider">电机2</label>
+                <input type="range" id="motor2Slider" min="-100" max="100" value="0" oninput="updateMotorSpeed(2, this.value)">
+                <span id="motor2Value">0</span>
+            </div>
+        </div>
+        <div class="btn-row">
+            <button class="btn" onclick="resetMotorSpeed(1)">复位电机1</button>
+            <button class="btn" onclick="resetMotorSpeed(2)">复位电机2</button>
+            <button class="btn" id="camera-capture-btn" onclick="toggleCameraCapture()">开启摄像头采集</button>
+        </div>
+        <div style="margin-top:10px;">
+            <label style="font-size:16px;">
+                <input type="checkbox" id="mqtt-connect-switch" style="transform:scale(1.5);margin-right:8px;">MQTT连接开关
+            </label>
+        </div>
+    </div>
+    <div class="log-area" id="log-area"></div>
+</div>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>
+// MQTT 配置
+const mqttServer = "ws://47.93.157.148:8083/mqtt"; // MQTT 服务器地址
+const topic = "/motor"; // 速度调节主题，与固件一致
+let client = null;
+let motor1Speed = 0;
+let motor2Speed = 0;
+let mqttSwitch = null;
+window.cameraCaptureEnabled = false;
+
+window.onload = function() {
+  mqttSwitch = document.getElementById('mqtt-connect-switch');
+  if (mqttSwitch) {
+    mqttSwitch.addEventListener('change', function() {
+      if (mqttSwitch.checked) {
+        connectMQTT();
+      } else {
+        if (client) {
+          client.end();
+          logMessage('已断开MQTT连接');
+        }
+      }
+    });
+  }
+  // 新增：键盘控制
+  document.addEventListener('keydown', handleKeyControl);
+};
+
+function clamp(val, min, max) {
+  return Math.max(min, Math.min(max, val));
+}
+
+function handleKeyControl(e) {
+  let changed = false;
+  switch (e.key.toLowerCase()) {
+    case 'w':
+      motor1Speed = clamp(motor1Speed + 10, -100, 100);
+      motor2Speed = clamp(motor2Speed + 10, -100, 100);
+      changed = true;
+      break;
+    case 's':
+      motor1Speed = clamp(motor1Speed - 10, -100, 100);
+      motor2Speed = clamp(motor2Speed - 10, -100, 100);
+      changed = true;
+      break;
+    case 'a':
+      motor1Speed = clamp(motor1Speed - 10, -100, 100);
+      motor2Speed = clamp(motor2Speed + 10, -100, 100);
+      changed = true;
+      break;
+    case 'd':
+      motor1Speed = clamp(motor1Speed + 10, -100, 100);
+      motor2Speed = clamp(motor2Speed - 10, -100, 100);
+      changed = true;
+      break;
+    case 't':
+      motor1Speed = 0;
+      motor2Speed = 0;
+      changed = true;
+      break;
+  }
+  if (changed) {
+    document.getElementById('motor1Slider').value = motor1Speed;
+    document.getElementById('motor2Slider').value = motor2Speed;
+    document.getElementById('motor1Value').textContent = motor1Speed;
+    document.getElementById('motor2Value').textContent = motor2Speed;
+    sendSpeedCommand();
+    logMessage('键盘控制: 电机1: ' + motor1Speed + ' 电机2: ' + motor2Speed);
+  }
+}
+
+function logMessage(message) {
+  const logArea = document.getElementById("log-area");
+  logArea.textContent += '[' + new Date().toLocaleTimeString() + '] ' + message + '\n';
+  logArea.scrollTop = logArea.scrollHeight;
+}
+
+function connectMQTT() {
+  if (client && client.connected) {
+    logMessage("MQTT已连接，无需重复连接。");
+    return;
+  }
+  logMessage("正在连接MQTT服务器...");
+  client = mqtt.connect(mqttServer, {
+    clientId: "web_client_" + Math.random().toString(16).substr(2, 8),
+    keepalive: 60,
+    clean: true,
+  });
+  client.on("connect", function() {
+    logMessage("已连接到 MQTT 服务器");
+    client.subscribe("/motor", function(err) {
+      if (!err) {
+        logMessage('已订阅主题: /motor');
+      } else {
+        logMessage('订阅主题失败: ' + err.message);
+      }
+    });
+    client.subscribe("/camera", function(err) {
+      if (!err) {
+        logMessage('已订阅主题: /camera');
+      }
+    });
+    client.subscribe("/motor_control", function(err) {
+      if (!err) {
+        logMessage('已订阅主题: /motor_control');
+      }
+    });
+    client.subscribe("/camera_control", function(err) {
+      if (!err) {
+        logMessage('已订阅主题: /camera_control');
+      }
+    });
+  });
+  client.on("error", function(err) {
+    logMessage('MQTT 连接失败: ' + err.message);
+  });
+  client.on("close", function() {
+    logMessage("MQTT 连接已关闭");
+  });
+  client.on("message", function(receivedTopic, message) {
+    if (receivedTopic === "/motor") {
+      logMessage('电机控制指令: ' + message.toString());
+    } else if (receivedTopic === "/camera") {
+      // 假设摄像头推送的是JPEG二进制数据
+      var arrayBuffer = message;
+      if (arrayBuffer instanceof Uint8Array || arrayBuffer instanceof ArrayBuffer) {
+        // 转为base64
+        var binary = '';
+        var bytes = new Uint8Array(arrayBuffer);
+        var len = bytes.byteLength;
+        for (var i = 0; i < len; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        var base64 = window.btoa(binary);
+        document.getElementById('camera-img').src = 'data:image/jpeg;base64,' + base64;
+      } else {
+        // 兼容字符串（如后端直接推送base64字符串）
+        document.getElementById('camera-img').src = 'data:image/jpeg;base64,' + message.toString();
+      }
+      logMessage('收到摄像头画面');
+    } else if (receivedTopic === "/motor_control") {
+      logMessage('电机动作/方向控制: ' + message.toString());
+    } else if (receivedTopic == "/camera_control") {
+      // 解析JSON指令，控制摄像头采集开关
+      try {
+        var obj = JSON.parse(message.toString());
+        if (typeof obj.capture === 'boolean') {
+          window.cameraCaptureEnabled = obj.capture;
+          logMessage('摄像头采集已' + (obj.capture ? '开启' : '关闭'));
+        }
+      } catch (e) {
+        logMessage('摄像头控制指令解析失败: ' + e);
+      }
+    }
+  });
+}
+
+function sendSpeedCommand() {
+  if (client && client.connected) {
+    var command = JSON.stringify({ speedA: motor1Speed, speedB: motor2Speed });
+    client.publish("/motor", command);
+    logMessage('已发送电机速度命令: ' + command);
+  } else {
+    logMessage("MQTT 未连接，无法发送命令");
+  }
+}
+
+function updateMotorSpeed(motor, speed) {
+  speed = parseInt(speed, 10);
+  if (motor === 1) {
+    motor1Speed = speed;
+    document.getElementById("motor1Value").textContent = speed;
+  } else if (motor === 2) {
+    motor2Speed = speed;
+    document.getElementById("motor2Value").textContent = speed;
+  }
+  sendSpeedCommand();
+  logMessage('电机1: ' + motor1Speed + ' 电机2: ' + motor2Speed);
+}
+
+function resetMotorSpeed(motor) {
+  if (motor === 1) {
+    motor1Speed = 0;
+    document.getElementById("motor1Slider").value = 0;
+    document.getElementById("motor1Value").textContent = 0;
+  } else if (motor === 2) {
+    motor2Speed = 0;
+    document.getElementById("motor2Slider").value = 0;
+    document.getElementById("motor2Value").textContent = 0;
+  }
+  sendSpeedCommand();
+  logMessage('电机' + motor + '速度已复位为: 0');
+}
+
+function refreshCamera() {
+    document.getElementById('camera-img').src = '';
+    setTimeout(function() {
+        document.getElementById('camera-img').src = document.getElementById('camera-img').src;
+    }, 100);
+    logMessage('请求刷新摄像头画面');
+}
+
+function toggleCameraCapture() {
+  window.cameraCaptureEnabled = !window.cameraCaptureEnabled;
+  var btn = document.getElementById('camera-capture-btn');
+  btn.textContent = window.cameraCaptureEnabled ? '关闭摄像头采集' : '开启摄像头采集';
+  // 发送MQTT控制指令
+  if (client && client.connected) {
+    var msg = JSON.stringify({ capture: window.cameraCaptureEnabled });
+    client.publish('/camera_control', msg);
+    logMessage('已发送摄像头采集控制: ' + msg);
+  } else {
+    logMessage('MQTT未连接，无法控制摄像头采集');
+  }
+}
+</script>
+</body>
+</html>
