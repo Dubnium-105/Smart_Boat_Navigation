@@ -1,50 +1,67 @@
 #include <WiFi.h>
-#include <Wire.h>
-#include <MPU6050.h>       // 陀螺仪和加速度计库
 #include <PubSubClient.h>  // MQTT客户端库
 #include <ArduinoJson.h>   // JSON处理库
-#include <Adafruit_MCP23X17.h> // I/O扩展模块库
  
+// 定义导航状态机的状态
+enum NavigationState {
+    STATE_STANDBY,        // 待机状态 - 不移动，等待命令
+    STATE_NAVIGATING,     // 导航中 - 主动寻找并跟踪红外信号
+    STATE_ARRIVED,        // 已到达终点
+    STATE_RETURNING,      // 返回起点
+    STATE_MANUAL,         // 手动控制
+    STATE_ERROR           // 错误状态 - 如信号丢失、电量不足等
+};
+
+// 当前导航状态
+NavigationState navState = STATE_STANDBY;
+unsigned long stateStartTime = 0;     // 状态开始时间
+unsigned long signalLostTime = 0;     // 信号丢失时间
+bool signalLocked = false;            // 是否锁定目标信号
+
 // 函数前置声明
 void setup_wifi();         // WiFi连接设置
-void setup_mpu();          // 陀螺仪初始化
 void setup_ir_sensors();   // 红外传感器初始化
-void motor_control(uint8_t ch, int speed); // 电机控制
+void setup_motors();       // TB6612FNG电机驱动初始化
+void motor_control(uint8_t ch, int speed); // TB6612FNG电机控制
+int apply_motor_deadzone(int speed);  // 电机死区处理
 void send_sensor_data();   // 发送传感器数据到MQTT
 bool mqtt_reconnect();     // MQTT重连
 void process_ir_data();    // 处理红外传感器数据
-void IRAM_ATTR handleInterrupt(); // 中断处理函数
+void IRAM_ATTR handleIRInterrupt(void *arg); // 红外传感器中断处理函数
+void update_navigation_state(); // 更新导航状态
+void execute_navigation_action(); // 基于当前状态执行动作
 
 // 网络配置 - 多个WiFi网络凭据
 const char* networks[][2] = {
     {"room@407", "room@407"},
     {"motorola", "1145141919"},
-    {"xbox", "12345678"}
+    {"IQOO Neo9 Pro", "NM_nm101030"}
 };
 
 WiFiClient espClient;       // WiFi客户端实例
 PubSubClient mqttClient(espClient);  // MQTT客户端
 
-// 硬件配置
-#define MOTOR_A_IN1 38     // A电机控制引脚1
-#define MOTOR_A_IN2 39     // A电机控制引脚2
-#define MOTOR_B_IN3 40     // B电机控制引脚1
-#define MOTOR_B_IN4 41     // B电机控制引脚2
-#define MCP_INT_PIN 10     // MCP23017的INTB引脚连接到ESP32的G10
-MPU6050 mpu;               // 陀螺仪实例
+// TB6612FNG电机驱动器硬件配置
+#define AIN1_PIN 16        // 电机A方向控制1
+#define AIN2_PIN 15        // 电机A方向控制2
+#define BIN1_PIN 17        // 电机B方向控制1
+#define BIN2_PIN 19        // 电机B方向控制2
+#define PWMA_PIN 7        // 电机A PWM控制
+#define PWMB_PIN 45        // 电机B PWM控制
+#define STBY_PIN 21        // TB6612FNG待机控制引脚
 
-// MCP23017配置 - I/O扩展模块
-Adafruit_MCP23X17 mcp;
+// 电机死区设置
+#define MOTOR_DEADZONE 10  // 死区范围：-10到+10之间的速度值会被设为0
 
-// 定义两个I2C总线引脚
-#define MPU_SDA 19   // MPU6050的SDA引脚
-#define MPU_SCL 20   // MPU6050的SCL引脚
-#define MCP_SDA 21   // MCP23017的SDA引脚
-#define MCP_SCL 47   // MCP23017的SCL引脚
-#define MCP_ADDR 0x27  // MCP23017的I2C地址，默认为0x20
-
-// 创建第二个I2C实例（Wire1）
-TwoWire mcpWire = TwoWire(1);  // 使用I2C端口1
+// 红外传感器引脚定义
+#define IR_SENSOR_0 14     // 0度 - 正前方 (对应原PB0)
+#define IR_SENSOR_1 13     // 45度 - 右前方 (对应原PB1)
+#define IR_SENSOR_2 12     // 315度 - 左前方 (对应原PB2)
+#define IR_SENSOR_3 11     // 270度 - 正左方 (对应原PB3)
+#define IR_SENSOR_4 10     // 225度 - 左后方 (对应原PB4)
+#define IR_SENSOR_5 9     // 180度 - 正后方 (对应原PB5)
+#define IR_SENSOR_6 46     // 135度 - 右后方 (对应原PB6)
+#define IR_SENSOR_7 3     // 90度 - 正右方 (对应原PB7)
 
 // 中断相关变量
 volatile bool interruptOccurred = false;  // 中断标志
@@ -83,12 +100,11 @@ float history_vector_y[HISTORY_SIZE] = {0};  // Y分量历史记录
 int history_index = 0;            // 当前历史记录索引
 bool history_filled = false;      // 历史记录是否已填满
 #define SENSOR_DEBOUNCE_MS 3      // 传感器去抖延时（毫秒）（减小以提高检测速度）
-#define MIN_STRENGTH_THRESHOLD 0.2 // 最小信号强度阈值（降低以提高检测灵敏度）
+#define MIN_STRENGTH_THRESHOLD 0.8 // 最小信号强度阈值（降低以提高检测灵敏度）
 #define SAMPLING_INTERVAL_MS 30   // 采样间隔（毫秒）
-// MQTT配置
-// 批量读取相关变量 mqttServer = "emqx.link2you.top";
-uint16_t input_port_state = 0;    // 存储MCP23017的GPIOB端口状态
-bool batch_read_enabled = true;   // 是否启用批量读取模式
+
+// 红外传感器状态变量
+volatile uint8_t interrupt_pin = 0;  // 记录最后触发中断的传感器编号
 
 // MQTT配置
 const char* mqttServer = "emqx.link2you.top"; 
@@ -113,6 +129,67 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
             Serial.printf("设置电机速度: A=%d, B=%d\n", speedA, speedB);
             motor_control(0, speedA);
             motor_control(1, speedB);
+            
+            // 如果通过MQTT直接控制电机，自动切换到手动模式
+            if (navState != STATE_MANUAL) {
+                navState = STATE_MANUAL;
+                stateStartTime = millis();
+                Serial.println("导航状态: 切换到手动控制模式");
+            }
+        }
+    }
+    else if (strcmp(topic, "/navigation") == 0) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, payload, length);
+        if (error) {
+            Serial.print("JSON解析失败: ");
+            Serial.println(error.c_str());
+            return;
+        }
+        
+        // 处理导航命令
+        if (doc["command"].is<String>()) {
+            String command = doc["command"].as<String>();
+            Serial.printf("收到导航命令: %s\n", command.c_str());
+            
+            if (command == "standby") {
+                navState = STATE_STANDBY;
+                motor_control(0, 0);  // 停止电机A
+                motor_control(1, 0);  // 停止电机B
+                Serial.println("导航状态: 切换到待机模式");
+            }
+            else if (command == "navigate") {
+                navState = STATE_NAVIGATING;
+                stateStartTime = millis();
+                Serial.println("导航状态: 开始导航");
+            }
+            else if (command == "return") {
+                navState = STATE_RETURNING;
+                stateStartTime = millis();
+                Serial.println("导航状态: 开始返航");
+            }            else if (command == "manual") {
+                navState = STATE_MANUAL;
+                Serial.println("导航状态: 切换到手动控制模式");
+            }
+            else if (command == "clear_history") {
+                // 清除历史数据缓存
+                for (int i = 0; i < HISTORY_SIZE; i++) {
+                    history_vector_x[i] = 0;
+                    history_vector_y[i] = 0;
+                    history_strengths[i] = 0;
+                    history_angles[i] = -1;
+                }
+                history_index = 0;
+                history_filled = false;
+                
+                // 清除当前目标数据
+                target_vector_x = 0.0;
+                target_vector_y = 0.0;
+                target_strength = 0.0;
+                target_angle = -1.0;
+                
+                Serial.println("✨ 已手动清除历史数据缓存");
+            }
         }
     }
 }
@@ -126,8 +203,10 @@ bool mqtt_reconnect() {
         if (mqttClient.connect(clientId.c_str())) {
             Serial.println("已连接到MQTT服务器");
             mqttClient.subscribe("/motor");
+            mqttClient.subscribe("/navigation");  // 订阅导航控制主题
             mqttClient.publish("/ESP32_info", "设备已上线");
             mqttClient.publish("/motor/status", "设备已连接");
+            mqttClient.publish("/navigation/status", "{\"state\":\"standby\"}");  // 发布初始导航状态
             return true;
         } else {
             Serial.print("MQTT连接失败, rc=");
@@ -140,124 +219,55 @@ bool mqtt_reconnect() {
 }
 
 void setup_ir_sensors() {
-    // 以更高的频率初始化MCP的I2C总线（标准是100kHz，我们提高到400kHz）
-    mcpWire.begin(MCP_SDA, MCP_SCL, 400000);
+    Serial.println("初始化红外传感器...");
     
-    // 扫描I2C总线，查找所有设备
-    Serial.println("扫描I2C设备...");
-    byte error, address;
-    int deviceCount = 0;
-    for(address = 1; address < 127; address++) {
-        mcpWire.beginTransmission(address);
-        error = mcpWire.endTransmission();
-        if (error == 0) {
-            Serial.printf("  发现I2C设备: 0x%02X\n", address);
-            deviceCount++;
-            
-            // 如果找到的设备地址与我们预期的MCP地址不同，更新MCP地址
-            if(address != MCP_ADDR && (address == 0x20 || address == 0x21 || 
-               address == 0x22 || address == 0x23 || address == 0x24 || 
-               address == 0x25 || address == 0x26 || address == 0x27)) {
-                Serial.printf("  更新MCP地址从0x%02X到0x%02X\n", MCP_ADDR, address);
-            }
-        }
-    }
-    
-    if (deviceCount == 0) {
-        Serial.println("未发现I2C设备！检查连接和上拉电阻。");
-    }
-    
-    // 尝试初始化MCP23017，最多尝试5次
-    bool mcpInitialized = false;
-    for(int attempt = 1; attempt <= 5; attempt++) {
-        Serial.printf("尝试初始化MCP23017 (第%d次)...\n", attempt);
+    // 定义所有传感器引脚
+    const uint8_t ir_pins[8] = {
+        IR_SENSOR_0, IR_SENSOR_1, IR_SENSOR_2, IR_SENSOR_3, 
+        IR_SENSOR_4, IR_SENSOR_5, IR_SENSOR_6, IR_SENSOR_7
+    };
+      // 初始化所有引脚为输入上拉模式（红外传感器通常是低电平有效的）
+    for (int i = 0; i < 8; i++) {
+        pinMode(ir_pins[i], INPUT_PULLUP);
         
-        // 尝试使用检测到的地址进行初始化
-        for(address = 0x20; address <= 0x27; address++) { // MCP23017可能的地址范围
-            Serial.printf("  尝试地址: 0x%02X...", address);
-            if(mcp.begin_I2C(address, &mcpWire)) {
-                Serial.println("成功!");
-                mcpInitialized = true;
-                break;
-            } else {
-                Serial.println("失败");
-            }
-        }
+        // 设置中断，当引脚状态变化时触发
+        attachInterruptArg(digitalPinToInterrupt(ir_pins[i]), handleIRInterrupt, (void*)(uintptr_t)i, CHANGE);
         
-        if(mcpInitialized) break;
-        
-        // 检查配线，等待一段时间后重试
-        Serial.println("初始化失败。请检查:");
-        Serial.println("1. MCP23017是否正确上电 (VDD和VSS)");
-        Serial.println("2. I2C引脚连接是否正确 (SDA接" + String(MCP_SDA) + ", SCL接" + String(MCP_SCL) + ")");
-        Serial.println("3. I2C引脚是否有10K上拉电阻");
-        Serial.println("4. 地址引脚(A0-A2)是否设置正确");
-        delay(1000);
+        // 读取初始状态（由于红外检测到时为低电平，需要进行反转）
+        ir_sensor_status[i] = !digitalRead(ir_pins[i]);
     }
     
-    if (!mcpInitialized) {
-        Serial.println("MCP23017初始化失败！系统将继续运行，但红外感应功能不可用");
-        return; // 不再执行死循环，允许程序继续运行
-    }
-    
-    // 设置B组8个引脚为输入模式（带上拉电阻）- 注意这里改为8-15引脚（GPIOB组）
-    for (int i = 8; i < 16; i++) {
-        mcp.pinMode(i, INPUT_PULLUP);
-    }
-    
-    // 配置中断功能
-    Serial.println("配置MCP23017中断功能...");
-    
-    // 设置所有B组引脚为中断触发源
-    for (int i = 8; i < 16; i++) {
-        // 使能中断功能
-        mcp.setupInterruptPin(i, CHANGE); // 当引脚状态变化时触发中断
-    }
-    
-    // 设置MCP23017的中断配置
-    // INTPOL = 1 (中断引脚电平高电平有效)
-    // ODR = 0 (中断引脚为推挽输出模式)
-    // 设置中断为非镜像模式，INTA对应PORTA, INTB对应PORTB
-    mcp.setupInterrupts(true, false, CHANGE);
-    
-    // 设置ESP32的中断引脚和中断处理函数
-    pinMode(MCP_INT_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(MCP_INT_PIN), handleInterrupt, FALLING);
-    
-    // 读取一次B组引脚状态，清除可能的中断标志
-    input_port_state = mcp.readGPIOAB() >> 8; // 获取B组状态(高8位)
-    
-    Serial.println("中断配置完成，现在系统将通过中断响应传感器状态变化");
-    Serial.println("红外传感器初始化完成");
+    Serial.println("红外传感器初始化完成，8个传感器已设置中断");
 }
 
 void process_ir_data() {
     static unsigned long last_change_time = 0;  // 上次传感器状态变化时间
     unsigned long now = millis();
     
-    // 批量读取B组引脚状态(8-15)
-    uint16_t port_state = mcp.readGPIOAB();
-    // 获取GPIOB的状态(高8位)
-    uint8_t b_port = port_state >> 8;
+    // 获取各传感器状态
+    const uint8_t ir_pins[8] = {
+        IR_SENSOR_0, IR_SENSOR_1, IR_SENSOR_2, IR_SENSOR_3, 
+        IR_SENSOR_4, IR_SENSOR_5, IR_SENSOR_6, IR_SENSOR_7
+    };
     
-    // 由于红外检测到物体时输出为低电平，需要反转状态
-    b_port = ~b_port & 0xFF;
-    
-    // 更新传感器状态
+    // 直接从引脚读取所有传感器状态
+    bool sensor_changed = false;
     for (int i = 0; i < 8; i++) {
-        // 从端口状态中提取每个传感器的状态位
-        bool current_state = (b_port >> i) & 0x01;
+        // 读取引脚状态（由于红外检测到时为低电平，需要进行反转）
+        bool current_state = !digitalRead(ir_pins[i]);
         
-        // 只有当状态稳定超过去抖时间后，才更新实际状态
-        if (now - last_change_time > SENSOR_DEBOUNCE_MS) {
-            ir_sensor_status[i] = current_state;
+        // 检测状态是否变化
+        if (current_state != ir_sensor_status[i]) {
+            if (now - last_change_time > SENSOR_DEBOUNCE_MS) {
+                ir_sensor_status[i] = current_state;
+                sensor_changed = true;
+            }
         }
     }
     
-    // 记录状态变化时间
-    if (b_port != (input_port_state & 0xFF)) {
+    // 如果有状态变化，更新最后变化时间
+    if (sensor_changed) {
         last_change_time = now;
-        input_port_state = b_port;
     }
     
     // 检查是否所有传感器都被激活 - 这可能是干扰或异常情况
@@ -331,8 +341,45 @@ void process_ir_data() {
         temp_angle = -1;
         temp_vector_x = 0;
         temp_vector_y = 0;
+    }      // 如果所有传感器都是0，则清空历史记录
+    if (active_sensors == 0) {
+        static unsigned long allZeroStartTime = 0;
+        static bool allZeroTimerStarted = false;
+        
+        if (!allZeroTimerStarted) {
+            allZeroStartTime = now;
+            allZeroTimerStarted = true;
+        } else if (now - allZeroStartTime > 2000) {  // 连续2秒所有传感器都是0
+            // 重置所有历史记录
+            for (int i = 0; i < HISTORY_SIZE; i++) {
+                history_vector_x[i] = 0;
+                history_vector_y[i] = 0;
+                history_strengths[i] = 0;
+                history_angles[i] = -1;  // 无效角度
+            }
+            history_index = 0;
+            history_filled = false;  // 标记历史记录为空
+            
+            // 立即清除当前目标数据
+            target_vector_x = 0.0;
+            target_vector_y = 0.0;
+            target_strength = 0.0;
+            target_angle = -1.0;
+            
+            allZeroTimerStarted = false;  // 重置计时器
+            
+            static unsigned long lastClearMessage = 0;
+            if (now - lastClearMessage > 5000) {  // 每5秒最多打印一次
+                Serial.println("📧 已清除历史数据缓存（所有传感器连续2秒为0）");
+                lastClearMessage = now;
+            }
+            return;  // 直接返回，不进行后续处理
+        }    } else {
+        // 有传感器激活，重置计时器
+        static bool allZeroTimerStarted = false;
+        allZeroTimerStarted = false;
     }
-    
+
     // 将当前数据添加到历史记录
     history_vector_x[history_index] = temp_vector_x;
     history_vector_y[history_index] = temp_vector_y;
@@ -369,9 +416,9 @@ void process_ir_data() {
                 valid_angles++;
             }
         }
-        
-        // 只有当有足够的有效数据时才更新全局变量
-        if (valid_angles > 0) {
+          // 只有当有足够的有效数据时才更新全局变量
+        if (valid_angles > 0 && active_sensors > 0) {
+            // 如果当前有活跃的传感器且历史记录中有有效角度，才更新全局变量
             target_vector_x = sum_vector_x / valid_angles;
             target_vector_y = sum_vector_y / valid_angles;
             target_strength = sum_strengths / valid_angles;
@@ -381,15 +428,14 @@ void process_ir_data() {
             target_angle = angle_rad * 180.0 / PI;
             if (target_angle < 0) target_angle += 360.0;
         } else {
-            // 如果没有有效数据，重置所有值
+            // 如果没有有效数据或当前无活跃传感器，无条件重置所有值
             target_vector_x = 0.0;
             target_vector_y = 0.0;
             target_strength = 0.0;
             target_angle = -1.0;
         }
     }
-    
-    // 在函数结束前添加串口输出
+      // 在函数结束前添加串口输出
     static unsigned long lastSerialOutput = 0;
     
     // 每500毫秒输出一次，避免串口输出太频繁
@@ -404,12 +450,31 @@ void process_ir_data() {
         }
         Serial.print("] ");
         
+        // 调试信息：显示当前活跃传感器数量和历史数据状态
+        Serial.printf("活跃传感器: %d, 历史样本: %d/%d, ", 
+                     active_sensors, 
+                     history_filled ? HISTORY_SIZE : history_index,
+                     HISTORY_SIZE);
+        
         // 打印目标信息
-        if (target_angle >= 0 && target_strength > 0.1) {
-            Serial.printf("目标: 角度=%.1f°, 强度=%.2f, 矢量=(%.2f, %.2f)\n", 
+        if (target_angle >= 0 && target_strength > 0.1 && (target_vector_x != 0 || target_vector_y != 0)) {
+            Serial.printf("目标: 角度=%.1f°, 强度=%.2f, 矢量=(%.2f, %.2f)", 
                           target_angle, target_strength, target_vector_x, target_vector_y);
+            
+            // 显示数据来源
+            if (active_sensors == 0) {
+                Serial.print(" [来源:历史数据]");
+            } else {
+                Serial.print(" [来源:当前+历史]");
+            }
+            Serial.println();
         } else {
             Serial.println("目标: 未检测到");
+            // 确保在输出"未检测到"时，所有目标相关值都被重置
+            target_angle = -1.0;
+            target_strength = 0.0;
+            target_vector_x = 0.0;
+            target_vector_y = 0.0;
         }
     }
 }
@@ -454,130 +519,89 @@ void setup_wifi() {
     Serial.println("全部尝试失败!");
 }
 
-void setup_mpu() {
-    Serial.println("初始化MPU6050...");
-    Wire.begin(MPU_SDA, MPU_SCL);  // 使用MPU的专用I2C引脚
+void setup_motors() {
+    Serial.println("初始化TB6612FNG电机驱动器...");
     
-    // 扫描I2C总线，查找所有设备
-    Serial.println("扫描MPU I2C总线...");
-    byte error, address;
-    int deviceCount = 0;
-    for(address = 1; address < 127; address++) {
-        Wire.beginTransmission(address);
-        error = Wire.endTransmission();
-        if (error == 0) {
-            Serial.printf("  发现I2C设备: 0x%02X", address);
-            if(address == 0x68 || address == 0x69) {
-                Serial.println(" (可能是MPU6050)");
-            } else {
-                Serial.println();
-            }
-            deviceCount++;
-        }
-    }
+    // 设置引脚模式
+    pinMode(STBY_PIN, OUTPUT);
+    pinMode(AIN1_PIN, OUTPUT);
+    pinMode(AIN2_PIN, OUTPUT);
+    pinMode(BIN1_PIN, OUTPUT);
+    pinMode(BIN2_PIN, OUTPUT);
+    pinMode(PWMA_PIN, OUTPUT);
+    pinMode(PWMB_PIN, OUTPUT);
     
-    if (deviceCount == 0) {
-        Serial.println("MPU6050 I2C总线上未发现设备！检查连接和上拉电阻。");
-    }
+    // 启用电机驱动器
+    digitalWrite(STBY_PIN, HIGH);
     
-    // 尝试初始化MPU6050，最多尝试3次
-    bool mpuInitialized = false;
-    for(int attempt = 1; attempt <= 3; attempt++) {
-        Serial.printf("尝试初始化MPU6050 (第%d次)...\n", attempt);
-        
-        // 尝试使用可能的地址初始化MPU6050
-        bool connectionResult = mpu.testConnection();
-        
-        if(connectionResult) {
-            Serial.println("MPU6050连接成功！");
-            mpu.initialize();
-            mpuInitialized = true;
-            
-            // 验证设置 - 注意：移除了dmpInitialize调用，因为当前库不支持
-            Serial.println("MPU6050基本初始化成功");
-            
-            break;
-        } else {
-            Serial.println("MPU6050连接失败");
-            
-            // 尝试单独联系0x69地址（备用地址）
-            Wire.beginTransmission(0x69);
-            if(Wire.endTransmission() == 0) {
-                Serial.println("检测到MPU6050在备用地址0x69，尝试使用此地址");
-                mpu = MPU6050(0x69);  // 使用备用地址创建新实例
-            } else {
-                delay(1000);  // 延迟后再次尝试
-            }
-        }
-    }
+    // 初始化所有输出为低电平
+    digitalWrite(AIN1_PIN, LOW);
+    digitalWrite(AIN2_PIN, LOW);
+    digitalWrite(BIN1_PIN, LOW);
+    digitalWrite(BIN2_PIN, LOW);
+    analogWrite(PWMA_PIN, 0);
+    analogWrite(PWMB_PIN, 0);
     
-    if (!mpuInitialized) {
-        Serial.println("MPU6050初始化失败！系统将继续运行，但姿态感应功能不可用");
-        // 创建虚拟数据以避免错误
-    } else {
-        // 设置MPU6050的配置
-        Serial.println("配置MPU6050...");
-        mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
-        mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
-        
-        Serial.println("MPU6050初始化完成");
-    }
+    Serial.println("TB6612FNG电机驱动初始化完成");
+    Serial.printf("电机死区设置: ±%d (速度绝对值小于此值时电机停止)\n", MOTOR_DEADZONE);
 }
 
-void setup_motors() {
-  // 设置四个PWM通道用于控制两个电机
-  ledcSetup(0, 5000, 8);  // 电机A方向1，5kHz频率，8位分辨率
-  ledcAttachPin(MOTOR_A_IN1, 0);
-  ledcSetup(1, 5000, 8);  // 电机A方向2
-  ledcAttachPin(MOTOR_A_IN2, 1);
-  ledcSetup(2, 5000, 8);  // 电机B方向1
-  ledcAttachPin(MOTOR_B_IN3, 2);
-  ledcSetup(3, 5000, 8);  // 电机B方向2
-  ledcAttachPin(MOTOR_B_IN4, 3);
+// 电机死区处理函数
+int apply_motor_deadzone(int speed) {
+    if (abs(speed) < MOTOR_DEADZONE) {
+        return 0;  // 在死区范围内，速度设为0
+    }
+    return speed;
 }
 
 void motor_control(uint8_t motor, int speed) {
-  // 限制速度值在-100到100之间
-  speed = constrain(speed, -100, 100);
-  
-  // motor=0控制A电机，motor=1控制B电机
-  if(motor == 0){
-    if(speed > 0){  // 正向旋转
-      ledcWrite(0, map(speed, 0,100, 0,255));  // 将速度从0-100映射到0-255范围
-      ledcWrite(1, 0);
-    } else {  // 反向旋转
-      ledcWrite(0, 0);
-      ledcWrite(1, map(abs(speed),0,100,0,255));
+    // 限制速度值在-100到100之间
+    speed = constrain(speed, -100, 100);
+    
+    // 应用死区处理
+    speed = apply_motor_deadzone(speed);
+    
+    // 将速度从-100~100映射到-255~255范围
+    int pwm_value = map(abs(speed), 0, 100, 0, 255);
+    
+    // motor=0控制A电机，motor=1控制B电机
+    if (motor == 0) {  // 电机A
+        if (speed > 0) {  // 正向旋转
+            digitalWrite(AIN1_PIN, HIGH);
+            digitalWrite(AIN2_PIN, LOW);
+            analogWrite(PWMA_PIN, pwm_value);
+        } else if (speed < 0) {  // 反向旋转
+            digitalWrite(AIN1_PIN, LOW);
+            digitalWrite(AIN2_PIN, HIGH);
+            analogWrite(PWMA_PIN, pwm_value);
+        } else {  // 停止电机
+            digitalWrite(AIN1_PIN, LOW);
+            digitalWrite(AIN2_PIN, LOW);
+            analogWrite(PWMA_PIN, 0);
+        }
+    } else if (motor == 1) {  // 电机B
+        if (speed > 0) {  // 正向旋转
+            digitalWrite(BIN1_PIN, HIGH);
+            digitalWrite(BIN2_PIN, LOW);
+            analogWrite(PWMB_PIN, pwm_value);
+        } else if (speed < 0) {  // 反向旋转
+            digitalWrite(BIN1_PIN, LOW);
+            digitalWrite(BIN2_PIN, HIGH);
+            analogWrite(PWMB_PIN, pwm_value);
+        } else {  // 停止电机
+            digitalWrite(BIN1_PIN, LOW);
+            digitalWrite(BIN2_PIN, LOW);
+            analogWrite(PWMB_PIN, 0);
+        }
     }
-  } else {
-    if(speed > 0){  // 正向旋转
-      ledcWrite(2, map(speed,0,100,0,255));
-      ledcWrite(3, 0);
-    } else {  // 反向旋转
-      ledcWrite(2, 0);
-      ledcWrite(3, map(abs(speed),0,100,0,255));
-    }
-  }
 }
 
 void send_sensor_data() {
-    // 获取MPU6050陀螺仪和加速度计数据
-    int16_t ax, ay, az, gx, gy, gz;
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    
     // 处理红外传感器数据
     process_ir_data();
     
     // 创建JSON文档用于MQTT发布
     JsonDocument doc;
-    
-    // 添加加速度计和陀螺仪数据
-    doc["ax"] = ax;  // X轴加速度
-    doc["ay"] = ay;  // Y轴加速度
-    doc["az"] = az;  // Z轴加速度
-    doc["gx"] = gx;  // X轴角速度
-    doc["gy"] = gy;  // Y轴角速度
-    doc["gz"] = gz;  // Z轴角速度
     
     // 添加8个红外传感器的状态数组 - 使用新的推荐语法
     JsonArray irArray = doc["ir_sensors"].to<JsonArray>();
@@ -703,10 +727,26 @@ void send_sensor_data() {
         left_speed = constrain(left_speed, -100, 100);
         right_speed = constrain(right_speed, -100, 100);
     }
-    
-    // 将推荐的电机速度添加到JSON文档
+      // 将推荐的电机速度添加到JSON文档
     doc["recommended_left"] = left_speed;
     doc["recommended_right"] = right_speed;
+    
+    // 添加导航状态信息
+    const char* stateNames[] = {
+        "standby",     // STATE_STANDBY
+        "navigating",  // STATE_NAVIGATING
+        "arrived",     // STATE_ARRIVED
+        "returning",   // STATE_RETURNING
+        "manual",      // STATE_MANUAL
+        "error"        // STATE_ERROR
+    };
+    doc["nav_state"] = stateNames[navState];
+    doc["state_duration"] = (millis() - stateStartTime) / 1000; // 当前状态持续时间（秒）
+    
+    if (navState == STATE_ERROR) {
+        doc["error_code"] = 1; // 简单错误代码，可以根据需要扩展
+        doc["error_message"] = "信号丢失";
+    }
     
     // 序列化JSON并发布到MQTT
     String jsonStr;
@@ -715,11 +755,352 @@ void send_sensor_data() {
 }
 
 // 中断处理函数
-void IRAM_ATTR handleInterrupt() {
+void IRAM_ATTR handleIRInterrupt(void* arg) {
+    // 获取是哪个传感器触发的中断
+    uint8_t pin_num = (uint8_t)(uintptr_t)arg;
+    
     // 在中断服务程序中尽量减少处理，只设置标志位
     portENTER_CRITICAL_ISR(&mux);
     interruptOccurred = true;
+    interrupt_pin = pin_num;
     portEXIT_CRITICAL_ISR(&mux);
+}
+
+// 导航状态机状态更新函数
+void update_navigation_state() {
+    unsigned long now = millis();
+    static unsigned long lastStateUpdate = 0;
+    
+    // 每100ms检查一次状态转换条件
+    if (now - lastStateUpdate < 100) {
+        return;
+    }
+    lastStateUpdate = now;
+    
+    // 记录之前的状态，用于检测状态变化
+    NavigationState prevState = navState;
+      switch (navState) {
+        case STATE_STANDBY:
+            // 待机状态无需自动转换，等待外部命令
+            break;
+              case STATE_NAVIGATING:
+            {
+                // 检查是否已到达终点（连续检测到强信号）
+                static unsigned long strongSignalStartTime = 0;
+                
+                if (target_strength > 0.9 && target_angle >= 0) {
+                    if (strongSignalStartTime == 0) {
+                        // 第一次检测到强信号
+                        strongSignalStartTime = now;
+                    } else if (now - strongSignalStartTime > 3000) {
+                        // 连续3秒检测到强信号，认为已到达终点
+                        navState = STATE_ARRIVED;
+                        stateStartTime = now;
+                        
+                        // 停止电机
+                        motor_control(0, 0);
+                        motor_control(1, 0);
+                    }
+                } else {
+                    // 重置强信号计时器
+                    strongSignalStartTime = 0;
+                }
+                
+                // 检查是否丢失信号
+                if (target_strength <= 0.1 || target_angle < 0) {
+                    if (signalLostTime == 0) {
+                        // 第一次检测到信号丢失
+                        signalLostTime = now;
+                    } else if (now - signalLostTime > 5000) {
+                        // 连续5秒检测不到信号，进入错误状态
+                        navState = STATE_ERROR;
+                        stateStartTime = now;
+                        
+                        // 停止电机
+                        motor_control(0, 0);
+                        motor_control(1, 0);
+                    }
+                } else {
+                    signalLostTime = 0; // 有信号，重置丢失计时器
+                }
+            }
+            break;
+            
+        case STATE_ARRIVED:
+            // 到达终点后5秒，自动切换到待机状态
+            if (now - stateStartTime > 5000) {
+                navState = STATE_STANDBY;
+                stateStartTime = now;
+            }
+            break;
+              case STATE_RETURNING:
+            {
+                // 返航状态的逻辑 - 可以寻找另一个红外信标
+                // 简单实现：如果180度方向有信号，认为找到起点
+                static unsigned long returnSignalTime = 0;
+                
+                if (target_angle >= 170 && target_angle <= 190 && target_strength > 0.8) {
+                    if (returnSignalTime == 0) {
+                        returnSignalTime = now;
+                    } else if (now - returnSignalTime > 3000) {
+                        // 连续3秒在后方检测到信号，认为已返回起点
+                        navState = STATE_STANDBY;
+                        stateStartTime = now;
+                        
+                        // 停止电机
+                        motor_control(0, 0);
+                        motor_control(1, 0);
+                    }
+                } else {
+                    // 未检测到返回信号，重置计时器
+                    returnSignalTime = 0;
+                    // 可以实现转圈搜索等策略
+                }
+                
+                // 如果长时间未返回（如2分钟），切换到待机模式
+                if (now - stateStartTime > 120000) {
+                    navState = STATE_STANDBY;
+                    stateStartTime = now;
+                }
+            }
+            break;
+            
+        case STATE_MANUAL:
+            // 手动模式无需自动转换，除非30秒无操作
+            if (now - stateStartTime > 30000) {
+                // 30秒无操作，转到待机模式
+                navState = STATE_STANDBY;
+                stateStartTime = now;
+                
+                // 停止电机
+                motor_control(0, 0);
+                motor_control(1, 0);
+            }
+            break;
+            
+        case STATE_ERROR:
+            // 错误状态10秒后自动尝试恢复到待机状态
+            if (now - stateStartTime > 10000) {
+                navState = STATE_STANDBY;
+                stateStartTime = now;
+            }
+            break;
+    }
+    
+    // 如果状态发生变化，打印日志并发送MQTT通知
+    if (prevState != navState) {
+        const char* stateNames[] = {
+            "待机",     // STATE_STANDBY
+            "导航中",   // STATE_NAVIGATING
+            "已到达",   // STATE_ARRIVED
+            "返航中",   // STATE_RETURNING
+            "手动控制", // STATE_MANUAL
+            "错误状态"  // STATE_ERROR
+        };
+        
+        Serial.printf("导航状态变化: %s -> %s\n", 
+                      stateNames[prevState], 
+                      stateNames[navState]);
+        
+        // 状态变化时发送MQTT通知
+        const char* mqttStateNames[] = {
+            "standby", "navigating", "arrived", "returning", "manual", "error"
+        };
+        
+        char stateMsg[100];
+        snprintf(stateMsg, sizeof(stateMsg), 
+                 "{\"state\":\"%s\",\"previous\":\"%s\",\"time\":%lu}", 
+                 mqttStateNames[navState], 
+                 mqttStateNames[prevState], 
+                 now);
+        
+        mqttClient.publish("/navigation/status", stateMsg);
+    }
+}
+
+// 高级自动控制算法 - 改进的精确追踪算法
+void calculate_advanced_control(int &left_speed, int &right_speed) {
+    if (target_strength <= 0.1 || target_angle < 0) {
+        // 无目标时的搜索行为
+        left_speed = 20;   // 缓慢右转搜索
+        right_speed = -20;
+        return;
+    }
+    
+    // 动态速度参数
+    const int base_speed = 55;
+    const float max_turn_ratio = 1.5;
+    const float pivot_threshold = 0.85;
+    const float approach_threshold = 0.7;
+    
+    // 计算目标方向的转向系数
+    float turn_factor = 0.0;
+    float angle_rad = target_angle * PI / 180.0;
+    
+    // 计算最短转向角度
+    float shortest_angle = target_angle;
+    if (shortest_angle > 180) {
+        shortest_angle = 360 - shortest_angle;
+        turn_factor = -sin(angle_rad);  // 左转
+    } else {
+        turn_factor = sin(angle_rad);   // 右转
+    }
+    
+    // 根据信号强度调整基础速度
+    int dynamic_speed = base_speed;
+    if (target_strength > approach_threshold) {
+        // 接近目标时减速
+        dynamic_speed = base_speed * (1.0 - (target_strength - approach_threshold) / (1.0 - approach_threshold) * 0.4);
+    }
+    
+    // 精确的转向控制
+    float turn_strength = abs(turn_factor);
+    
+    if (turn_strength > pivot_threshold) {
+        // 大角度时原地转向
+        int pivot_speed = dynamic_speed * 0.6;
+        if (turn_factor > 0) {  // 右转
+            left_speed = pivot_speed;
+            right_speed = -pivot_speed / 2;
+        } else {  // 左转
+            left_speed = -pivot_speed / 2;
+            right_speed = pivot_speed;
+        }
+    } else {
+        // 小角度时差速转向
+        float speed_diff = dynamic_speed * turn_strength * max_turn_ratio;
+        
+        if (target_angle >= 315 || target_angle < 45) {
+            // 前方区域 - 直行为主，微调转向
+            left_speed = dynamic_speed;
+            right_speed = dynamic_speed;
+            
+            if (turn_factor > 0.1) {  // 需要右转
+                right_speed -= speed_diff * 0.5;
+            } else if (turn_factor < -0.1) {  // 需要左转
+                left_speed -= speed_diff * 0.5;
+            }
+        } else if (target_angle >= 45 && target_angle < 135) {
+            // 右侧区域
+            left_speed = dynamic_speed;
+            right_speed = dynamic_speed - speed_diff;
+        } else if (target_angle >= 135 && target_angle < 225) {
+            // 后方区域 - 根据哪侧更近选择转向方向
+            int pivot_speed = dynamic_speed * 0.7;
+            if (target_angle < 180) {  // 右后方，右转
+                left_speed = pivot_speed;
+                right_speed = -pivot_speed / 3;
+            } else {  // 左后方，左转
+                left_speed = -pivot_speed / 3;
+                right_speed = pivot_speed;
+            }
+        } else {
+            // 左侧区域
+            left_speed = dynamic_speed - speed_diff;
+            right_speed = dynamic_speed;
+        }
+    }
+    
+    // 限制速度范围
+    left_speed = constrain(left_speed, -100, 100);
+    right_speed = constrain(right_speed, -100, 100);
+}
+
+// 根据当前导航状态执行相应动作
+void execute_navigation_action() {
+    int left_speed = 0, right_speed = 0;
+    
+    switch (navState) {
+        case STATE_STANDBY:
+            // 待机状态 - 停止所有电机
+            motor_control(0, 0);
+            motor_control(1, 0);
+            break;
+            
+        case STATE_NAVIGATING:
+            // 导航状态 - 使用高级自动控制算法
+            calculate_advanced_control(left_speed, right_speed);
+            motor_control(0, left_speed);
+            motor_control(1, right_speed);
+            break;
+            
+        case STATE_ARRIVED:
+            // 已到达终点 - 停止所有电机
+            motor_control(0, 0);
+            motor_control(1, 0);
+            break;
+            
+        case STATE_RETURNING:
+            // 返航状态 - 使用简化的返航算法
+            {
+                static bool turned180 = false;
+                static unsigned long turnStartTime = 0;
+                
+                if (!turned180) {
+                    // 首先执行180度转向
+                    if (turnStartTime == 0) {
+                        turnStartTime = millis();
+                    }
+                    
+                    if (millis() - turnStartTime < 2500) {
+                        motor_control(0, -35);  // 原地左转
+                        motor_control(1, 35);
+                    } else {
+                        turned180 = true;
+                        motor_control(0, 0);    // 短暂停止
+                        motor_control(1, 0);
+                        delay(200);
+                    }
+                } else {
+                    // 转向完成，寻找起点信标
+                    if (target_strength > 0.15 && target_angle >= 0) {
+                        // 有信号时使用简化的控制算法
+                        const int return_speed = 40;
+                        
+                        if (target_angle >= 315 || target_angle < 45) {
+                            left_speed = return_speed;
+                            right_speed = return_speed;
+                        } else if (target_angle >= 45 && target_angle < 135) {
+                            left_speed = return_speed;
+                            right_speed = return_speed / 3;
+                        } else if (target_angle >= 135 && target_angle < 225) {
+                            left_speed = return_speed / 2;
+                            right_speed = -return_speed / 2;
+                        } else {
+                            left_speed = return_speed / 3;
+                            right_speed = return_speed;
+                        }
+                        
+                        motor_control(0, left_speed);
+                        motor_control(1, right_speed);
+                    } else {
+                        // 无信号时搜索
+                        motor_control(0, 20);
+                        motor_control(1, -20);
+                    }
+                }
+            }
+            break;
+            
+        case STATE_MANUAL:
+            // 手动模式 - 电机控制由外部MQTT命令决定
+            // 不在这里设置电机速度，由MQTT回调处理
+            break;
+            
+        case STATE_ERROR:
+            // 错误状态 - 停止电机并可能闪烁LED警告
+            motor_control(0, 0);
+            motor_control(1, 0);
+            
+            // 可选：添加错误指示（如闪烁LED）
+            static unsigned long errorBlinkTime = 0;
+            if (millis() - errorBlinkTime > 500) {
+                errorBlinkTime = millis();
+                // 这里可以添加LED闪烁代码
+                Serial.println("ERROR: 系统处于错误状态");
+            }
+            break;
+    }
 }
 
 void setup() {
@@ -728,12 +1109,8 @@ void setup() {
     delay(1000);
     randomSeed(esp_random());  // 使用ESP32的硬件随机数生成器，避免使用ADC引脚
     
-    Serial.println("初始化I2C...");
-    Wire.begin(MPU_SDA, MPU_SCL);
-    
     setup_ir_sensors();
     setup_wifi();
-    setup_mpu();
     setup_motors();
     
     mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE);
@@ -747,6 +1124,7 @@ void loop() {
     static unsigned long lastMqttReconnect = 0;
     static unsigned long lastSensorDataSend = 0;
     static unsigned long lastInterruptCheck = 0;
+    static unsigned long lastStatusDisplay = 0;
     unsigned long now = millis();
     
     // 检查WiFi连接状态
@@ -789,11 +1167,37 @@ void loop() {
         send_sensor_data();
     }
     
-    // 周期性清除并重新读取中断状态，防止中断标志丢失
+    // 周期性读取传感器状态，防止错过中断
     if (now - lastInterruptCheck > 1000) {
         lastInterruptCheck = now;
-        // 读取一次中断状态寄存器，清除任何挂起的中断
-        mcp.getLastInterruptPin();
-        mcp.clearInterrupts();
+        process_ir_data();
+    }
+    
+    // 更新导航状态机 - 检查状态转换条件并执行状态转换
+    update_navigation_state();
+    
+    // 执行与当前状态相关的动作
+    execute_navigation_action();
+    
+    // 每5秒显示一次当前导航状态
+    if (now - lastStatusDisplay > 5000) {
+        lastStatusDisplay = now;
+        const char* stateNames[] = {
+            "待机",     // STATE_STANDBY
+            "导航中",   // STATE_NAVIGATING
+            "已到达",   // STATE_ARRIVED
+            "返航中",   // STATE_RETURNING
+            "手动控制", // STATE_MANUAL
+            "错误状态"  // STATE_ERROR
+        };
+        
+        Serial.printf("当前导航状态: %s (已持续 %.1f 秒)\n", 
+                     stateNames[navState], 
+                     (now - stateStartTime) / 1000.0);
+                     
+        // 如果处于导航中状态，显示目标信息
+        if (navState == STATE_NAVIGATING && target_angle >= 0) {
+            Serial.printf("目标: 角度=%.1f°, 强度=%.2f\n", target_angle, target_strength);
+        }
     }
 }

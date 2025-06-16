@@ -12,8 +12,7 @@ class IRControlApp:
         self.window = tk.Tk()
         self.window.title("红外追踪控制系统")
         self.window.geometry("800x700")
-        
-        # 传感器数据 - 改为8个传感器
+          # 传感器数据 - 改为8个传感器
         self.ir_sensor_status = [False] * 8
         self.target_angle = -1.0
         self.target_strength = 0.0
@@ -27,6 +26,18 @@ class IRControlApp:
         # 实际的电机速度
         self.motor_a_speed = 0
         self.motor_b_speed = 0
+        
+        # 导航状态机相关变量
+        self.nav_state = "standby"  # 初始状态为待机
+        self.state_duration = 0     # 当前状态持续时间（秒）
+        self.nav_states_map = {
+            "standby": "待机",
+            "navigating": "导航中",
+            "arrived": "已到达",
+            "returning": "返航中",
+            "manual": "手动控制",
+            "error": "错误状态"
+        }
         
         # 传感器方向矢量（8个方向），根据实际安装顺序（0 1 7 6 5 4 3 2）
         # PB0 -> 0度, PB1 -> 45度, PB7 -> 90度, PB6 -> 135度
@@ -131,14 +142,37 @@ class IRControlApp:
         # 状态显示
         self.status_label = ttk.Label(main_frame, text="状态: 未连接")
         self.status_label.pack(pady=5)
-        
-        # 推荐控制值显示
+          # 推荐控制值显示
         self.recommendation_label = ttk.Label(main_frame, text="推荐控制: 左=0, 右=0")
         self.recommendation_label.pack(pady=2)
         
         # 应用推荐控制按钮
         self.apply_button = ttk.Button(main_frame, text="应用推荐控制", command=self.apply_recommended_control)
         self.apply_button.pack(pady=5)
+        
+        # 导航控制面板
+        nav_frame = ttk.LabelFrame(main_frame, text="导航控制")
+        nav_frame.pack(pady=5, fill=tk.X)
+        
+        # 导航状态显示
+        self.nav_state_label = ttk.Label(nav_frame, text="导航状态: 待机 (0秒)", font=("Arial", 12))
+        self.nav_state_label.pack(pady=5)
+        
+        # 导航控制按钮
+        nav_buttons_frame = ttk.Frame(nav_frame)
+        nav_buttons_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(nav_buttons_frame, text="待机", 
+                  command=lambda: self.send_navigation_command("standby")).grid(row=0, column=0, padx=5, pady=5)
+        ttk.Button(nav_buttons_frame, text="开始导航", 
+                  command=lambda: self.send_navigation_command("navigate")).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(nav_buttons_frame, text="返航", 
+                  command=lambda: self.send_navigation_command("return")).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Button(nav_buttons_frame, text="手动控制", 
+                  command=lambda: self.send_navigation_command("manual")).grid(row=0, column=3, padx=5, pady=5)
+        
+        for i in range(4):
+            nav_buttons_frame.columnconfigure(i, weight=1)
         
         # 定时更新UI
         self.window.after(100, self.update_ui)
@@ -214,15 +248,14 @@ class IRControlApp:
             
             self.canvas.create_line(
                 center_x, center_y, target_x, target_y,
-                fill="yellow", width=3, arrow=tk.LAST
-            )
+                fill="yellow", width=3, arrow=tk.LAST            )
             
             self.target_info.config(
                 text=f"目标: 方向={self.target_angle:.1f}°, 强度={self.target_strength:.2f}"
             )
         else:
             self.target_info.config(text="目标: 未检测到")
-    
+            
     def process_sensor_data(self, data):
         """处理传感器数据"""
         if 'ir_sensors' in data:
@@ -238,36 +271,48 @@ class IRControlApp:
             self.target_vector_x = data['target_x']
             self.target_vector_y = data['target_y']
             
+        # 处理导航状态信息
+        if 'nav_state' in data:
+            self.nav_state = data['nav_state']
+            
+        if 'state_duration' in data:
+            self.state_duration = data['state_duration']
+            
+        # 处理推荐的电机速度
         if 'recommended_left' in data and 'recommended_right' in data:
             self.recommended_left = data['recommended_left']
             self.recommended_right = data['recommended_right']
             self.recommendation_label.config(
                 text=f"推荐控制: 左={self.recommended_left}, 右={self.recommended_right}"
             )
+              # 更新导航状态显示
+        if hasattr(self, 'nav_state_label'):
+            state_text = self.nav_states_map.get(self.nav_state, "未知状态")
+            self.nav_state_label.config(
+                text=f"导航状态: {state_text} ({self.state_duration}秒)"
+            )
             
         if self.auto_control:
             self.apply_recommended_control()
-    
+            
     def apply_recommended_control(self):
         """应用推荐的控制值"""
         if self.recommended_left != 0 or self.recommended_right != 0:
             self.motor_a_speed = self.recommended_left
             self.motor_b_speed = self.recommended_right
-            
             self.slider_L.set(self.motor_a_speed)
             self.slider_R.set(self.motor_b_speed)
-            
             self.send_motor_command()
             
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.debug_print("已成功连接到MQTT服务器")
             self.status_label.config(text="状态: 已连接")
-            
             topics = [
                 ("/motor/status", 0),
                 ("/sensor/data", 0),
-                ("/ESP32_info", 0)
+                ("/ESP32_info", 0),
+                ("/navigation/status", 0)
             ]
             
             for topic, qos in topics:
@@ -278,14 +323,12 @@ class IRControlApp:
         else:
             self.debug_print(f"连接失败，返回码: {rc}")
             self.status_label.config(text=f"状态: 连接失败 (代码: {rc})")
-    
     def on_disconnect(self, client, userdata, rc):
         self.debug_print(f"与MQTT服务器断开连接，代码: {rc}")
         self.status_label.config(text="状态: 已断开连接")
-        
         if rc != 0:
             self.window.after(5000, self.connect_mqtt)
-        
+    
     def on_message(self, client, userdata, msg):
         try:
             if msg.topic == "/ESP32_info":
@@ -296,13 +339,28 @@ class IRControlApp:
                 status = msg.payload.decode()
                 self.debug_print(f"电机状态: {status}")
                 self.status_label.config(text=f"状态: {status}")
-            
+                
             elif msg.topic == "/sensor/data":
                 try:
                     data = json.loads(msg.payload.decode())
                     self.process_sensor_data(data)
                 except Exception as e:
                     self.debug_print(f"处理传感器数据错误: {str(e)}")
+            
+            elif msg.topic == "/navigation/status":
+                try:
+                    data = json.loads(msg.payload.decode())
+                    if 'state' in data:
+                        self.nav_state = data['state']
+                        if hasattr(self, 'nav_state_label'):
+                            state_text = self.nav_states_map.get(self.nav_state, "未知状态")
+                            duration = data.get('time', 0) / 1000  # 转换为秒
+                            self.nav_state_label.config(
+                                text=f"导航状态: {state_text} ({duration:.1f}秒)"
+                            )
+                        self.debug_print(f"导航状态更新: {data['state']}")
+                except Exception as e:
+                    self.debug_print(f"处理导航状态数据错误: {str(e)}")
                 
         except Exception as e:
             self.debug_print(f"处理消息错误: {str(e)}")
@@ -338,6 +396,19 @@ class IRControlApp:
             
             self.motor_a_label.config(text=f"左电机速度: {self.motor_a_speed}")
             self.motor_b_label.config(text=f"右电机速度: {self.motor_b_speed}")
+    
+    def send_navigation_command(self, command):
+        """发送导航控制命令"""
+        cmd = {
+            "command": command
+        }
+        self.client.publish("/navigation", json.dumps(cmd))
+        self.debug_print(f"已发送导航命令: {command}")
+        
+        # 如果是手动控制模式，确保滑块控制可用
+        if command == "manual":
+            self.auto_var.set(False)
+            self.auto_control = False
     
     def run(self):
         self.window.mainloop()
