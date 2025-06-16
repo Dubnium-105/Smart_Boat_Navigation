@@ -30,11 +30,11 @@ void setup_motors() {
 /**
  * 控制电机运动
  * @param motor 电机选择 (0=电机A, 1=电机B)
- * @param speed 速度值 (-100到100，负值表示反向)
+ * @param pwm_value PWM值 (-255到255，负值表示反向，直接使用无映射)
  */
-void motor_control(uint8_t motor, int speed) {
-  // 确保速度在-100到100范围内
-  speed = constrain(speed, -100, 100);
+void motor_control(uint8_t motor, int pwm_value) {
+  // 确保PWM值在-255到255范围内
+  pwm_value = constrain(pwm_value, -255, 255);
   
   uint8_t pin1_channel, pin2_channel;
   
@@ -48,16 +48,14 @@ void motor_control(uint8_t motor, int speed) {
     return; // 无效电机编号
   }
 
-  if (speed > 0) { // 正转
-    int pwmValue = map(speed, 0, 100, 0, 255);
-    ledcWrite(pin1_channel, pwmValue);
+  if (pwm_value > 0) { // 正转，直接使用PWM值
+    ledcWrite(pin1_channel, pwm_value);
     ledcWrite(pin2_channel, 0);
-    // Serial.printf("Motor %d Forward: PWM=%d\n", motor, pwmValue);
-  } else if (speed < 0) { // 反转
-    int pwmValue = map(abs(speed), 0, 100, 0, 255);
+    // Serial.printf("Motor %d Forward: PWM=%d\n", motor, pwm_value);
+  } else if (pwm_value < 0) { // 反转，直接使用PWM绝对值
     ledcWrite(pin1_channel, 0);
-    ledcWrite(pin2_channel, pwmValue);
-    // Serial.printf("Motor %d Reverse: PWM=%d\n", motor, pwmValue);
+    ledcWrite(pin2_channel, abs(pwm_value));
+    // Serial.printf("Motor %d Reverse: PWM=%d\n", motor, abs(pwm_value));
   } else { // 停止
     ledcWrite(pin1_channel, 0);
     ledcWrite(pin2_channel, 0);

@@ -38,7 +38,7 @@ bool mqtt_reconnect() {
     Serial.print("尝试MQTT连接...");
     // 创建一个随机的客户端ID
     String clientId = "ESP32-CAM-";
-    clientId += String(random(0xffff), HEX); 
+    clientId += "黑色大船";
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("已连接到MQTT服务器");
       
@@ -141,23 +141,23 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       Serial.println(error.c_str());
       return;
     }
-    
-    // 检查是否包含电机速度参数
+      // 检查是否包含电机速度参数
     if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
-       // 获取电机速度值
+       // 获取电机PWM值（直接使用，不映射）
        int speedA = doc["speedA"].as<int>();
        int speedB = doc["speedB"].as<int>();
-       speedA = constrain(speedA, -100, 100); // 限制速度范围
-       speedB = constrain(speedB, -100, 100); // 限制速度范围
+       speedA = constrain(speedA, -255, 255); // 限制PWM范围到-255~+255
+       speedB = constrain(speedB, -255, 255); // 限制PWM范围到-255~+255
        
-       Serial.printf("通过MQTT设置电机速度: A=%d, B=%d\n", speedA, speedB);
-       motor_control(0, speedA); // 控制电机A
-       motor_control(1, speedB); // 控制电机B
+       Serial.printf("通过MQTT设置电机PWM: A=%d, B=%d\n", speedA, speedB);
+       motor_control(0, speedA); // 控制电机A，直接传入PWM值
+       motor_control(1, speedB); // 控制电机B，直接传入PWM值
        
        // 发送电机状态确认
        DynamicJsonDocument resDoc(128);
        resDoc["speedA"] = speedA;
        resDoc["speedB"] = speedB;
+       resDoc["pwm_direct"] = true; // 标识使用直接PWM控制
        resDoc["timestamp"] = millis();
        
        String resStr;
@@ -197,12 +197,29 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       serializeJson(resDoc, resStr);
       mqttClient.publish("/stream/status", resStr.c_str());
     }
-  }
-  // 处理MQTT连接检查
+  }  // 处理MQTT连接检查
   else if (strcmp(topic, "/check_mqtt") == 0) {
     // 简单回复，表示在线
     mqttClient.publish("/check_mqtt_reply", "pong");
     Serial.println("收到/check_mqtt，已回复/pong");
+    
+    // 同时发送ESP32详细信息，更新网页WiFi状态显示
+    JsonDocument infoDoc;
+    infoDoc["msg"] = "MQTT连接检查响应";
+    infoDoc["ip"] = WiFi.localIP().toString();
+    infoDoc["wifi_ssid"] = WiFi.SSID();
+    infoDoc["wifi_rssi"] = WiFi.RSSI();
+    infoDoc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+    infoDoc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
+    infoDoc["mode"] = "manual_control";
+    infoDoc["uptime"] = millis() / 1000; // 系统运行时间（秒）
+    infoDoc["free_heap"] = ESP.getFreeHeap(); // 可用内存
+    infoDoc["timestamp"] = millis();
+    
+    String infoStr;
+    serializeJson(infoDoc, infoStr);
+    mqttClient.publish("/ESP32_info", infoStr.c_str());
+    Serial.println("已发送ESP32系统信息到/ESP32_info");
   }
   // 处理OTA升级命令
   else if (strcmp(topic, "/ota") == 0) {

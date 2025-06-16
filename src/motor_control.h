@@ -18,8 +18,8 @@ void setup_motors();
  * @brief 控制指定电机的速度和方向。
  * 
  * @param motor 电机选择 (0=电机A, 1=电机B)。
- * @param speed 速度值 (-100到100，负值表示反向，0表示停止)。
+ * @param pwm_value PWM值 (-255到255，负值表示反向，0表示停止，直接使用无映射)。
  */
-void motor_control(uint8_t motor, int speed);
+void motor_control(uint8_t motor, int pwm_value);
 
 #endif // MOTOR_CONTROL_H
