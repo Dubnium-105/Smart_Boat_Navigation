@@ -20,6 +20,9 @@ extern float currentFPS;
 // 声明来自stream.cpp的函数
 extern void configureStreamServer(bool enable, const char* serverUrl);
 
+// 全局保存本机clientId
+String g_clientId = "";
+
 void setupMQTT() {
   randomSeed(esp_random()); // 使用ESP32硬件随机数生成器
   mqttClient.setServer(mqttServer, mqttPort);
@@ -38,7 +41,8 @@ bool mqtt_reconnect() {
     Serial.print("尝试MQTT连接...");
     // 创建一个随机的客户端ID
     String clientId = "ESP32-CAM-";
-    clientId += "黑色大船";
+    clientId += "黑色大船"; // TODO: 可根据实际硬件唯一标识生成
+    g_clientId = clientId; // 保存全局
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("已连接到MQTT服务器");
       
@@ -58,8 +62,8 @@ bool mqtt_reconnect() {
       doc["wifi_rssi"] = WiFi.RSSI();
       doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
       doc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
-      doc["mode"] = "manual_control"; // 指示当前为手动控制模式
-
+      doc["mode"] = "manual_control";
+      doc["clientId"] = g_clientId;
       String infoStr;
       serializeJson(doc, infoStr);
       mqttClient.publish("/ESP32_info", infoStr.c_str());
@@ -141,7 +145,18 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       Serial.println(error.c_str());
       return;
     }
-      // 检查是否包含电机速度参数
+    // 新增：clientId过滤
+    if (doc.containsKey("clientId") && doc["clientId"].is<const char*>()) {
+      String targetId = doc["clientId"].as<const char*>();
+      if (targetId != g_clientId) {
+        Serial.printf("忽略非本机指令，目标clientId=%s，本机clientId=%s\n", targetId.c_str(), g_clientId.c_str());
+        return;
+      }
+    } else {
+      Serial.println("未指定clientId，忽略指令");
+      return;
+    }
+    // 检查是否包含电机速度参数
     if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
        // 获取电机PWM值（直接使用，不映射）
        int speedA = doc["speedA"].as<int>();
@@ -212,9 +227,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     infoDoc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
     infoDoc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
     infoDoc["mode"] = "manual_control";
-    infoDoc["uptime"] = millis() / 1000; // 系统运行时间（秒）
-    infoDoc["free_heap"] = ESP.getFreeHeap(); // 可用内存
-    infoDoc["timestamp"] = millis();
+    infoDoc["clientId"] = g_clientId;
     
     String infoStr;
     serializeJson(infoDoc, infoStr);
