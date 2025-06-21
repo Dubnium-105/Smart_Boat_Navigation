@@ -48,7 +48,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
   Serial.println("\n\n====================================");
-  Serial.println("      船舶手动控制系统启动中...     ");
+  Serial.println("      船舶控制系统启动中...     ");
   Serial.println("====================================");
 
   // 1. 创建互斥锁 (必须在任务使用前创建)
@@ -126,9 +126,8 @@ void cameraTask(void *pvParameters) {
 
 // --- Arduino Loop ---
 void loop() {
-  if (!wifiAutoReconnect()) {
-    return;
-  }
+    // 自动WiFi重连
+    wifiAutoReconnect();
   static unsigned long lastMqttReconnectAttempt = 0;
   unsigned long currentTime = millis();
 
