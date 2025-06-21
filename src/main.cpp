@@ -43,6 +43,10 @@ bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄�
 TaskHandle_t cameraTaskHandle = NULL;
 void cameraTask(void *pvParameters);
 
+// 添加IR控制相关声明
+extern void setupIR();
+extern void handleIRSignal();
+
 // --- Arduino Setup ---
 void setup() {
   Serial.begin(115200);
@@ -96,6 +100,9 @@ void setup() {
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
+  // 初始化红外接收器
+  setupIR();
+  
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
   if (WiFi.status() == WL_CONNECTED) {
@@ -142,6 +149,9 @@ void loop() {
     mqttClient.loop();
   }
 
+  // 处理红外信号
+  handleIRSignal();
+  
   // loop() 不再采集摄像头帧，避免与cameraTask冲突
   delay(2); // 保持高帧率
 }
