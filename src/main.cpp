@@ -79,11 +79,14 @@ void setup() {
   if (!cameraAvailable) {
     Serial.println("摄像头初始化失败，启用降级模式：仅WiFi和MQTT功能");
   }
+  // 3. 初始化红外接收器
+  Serial.println("初始化红外接收器...");
+  setupIR();
 
-  // 3. 初始化电机
+  // 4. 初始化电机
   setup_motors();
 
-  // 4. 连接WiFi
+  // 5. 连接WiFi
   if (!connectWiFi()) {
     Serial.println("WiFi连接失败，重启...");
     delay(1000);
