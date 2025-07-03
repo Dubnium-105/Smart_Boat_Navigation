@@ -82,3 +82,25 @@ void motor_control_ir_auto(int mainDirIdx) {
     motor_control(0, left);
     motor_control(1, right);
 }
+
+// 红外导航控制，带强制停止选项
+void motor_control_ir_navigation(int mainDirIdx, bool forceStop) {
+    if (forceStop) {
+        motor_control(0, 0);
+        motor_control(1, 0);
+        return;
+    }
+    if (mainDirIdx < 0 || mainDirIdx > 7) return;
+    int targetAngle = IR_ANGLES[mainDirIdx];
+    int delta = (targetAngle + 360) % 360;
+    if (delta > 180) delta -= 360; // -180~180
+    int baseSpeed = 120;
+    int maxSpeed = 150;
+    int diff = (delta * 2) / 90;
+    int left = baseSpeed - diff * 60;
+    int right = baseSpeed + diff * 60;
+    left = constrain(left, -maxSpeed, maxSpeed);
+    right = constrain(right, -maxSpeed, maxSpeed);
+    motor_control(0, left);
+    motor_control(1, right);
+}

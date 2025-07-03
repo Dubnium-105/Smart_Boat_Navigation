@@ -30,6 +30,12 @@ void setNavMode(int mode) {
     irNavState = mode;
     irStateStartTime = millis();
     Serial.printf("导航状态切换为: %s\n", get_ir_nav_mode_str().c_str());
+    // 切换模式时速度归零并停止电机
+    extern int speedA, speedB;
+    speedA = 0;
+    speedB = 0;
+    motor_control(0, 0);
+    motor_control(1, 0);
     // 可选：反馈当前状态到MQTT
     JsonDocument doc;
     doc["nav_mode"] = get_ir_nav_mode_str();
@@ -70,6 +76,21 @@ void publishStatusInfo(const char* extraMsg) {
   String infoStr;
   serializeJson(infoDoc, infoStr);
   mqttClient.publish("/ESP32_info", infoStr.c_str());
+}
+
+// 发送红外方向信息到MQTT
+void publishIRInfo(int sensorId, const char* direction, int angle) {
+  if (mqttClient.connected()) {
+    JsonDocument irDoc;
+    irDoc["direction"] = direction;
+    irDoc["sensor_id"] = sensorId;
+    irDoc["angle"] = angle;
+    irDoc["timestamp"] = millis();
+    
+    String irInfoStr;
+    serializeJson(irDoc, irInfoStr);
+    mqttClient.publish("/ir_info", irInfoStr.c_str());
+  }
 }
 
 bool mqtt_reconnect() {
@@ -158,8 +179,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
     // 检查是否包含电机速度参数
     if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
-       int speedA = doc["speedA"].as<int>();
-       int speedB = doc["speedB"].as<int>();
+       extern int speedA, speedB;
+       speedA = doc["speedA"].as<int>();
+       speedB = doc["speedB"].as<int>();
        speedA = constrain(speedA, -255, 255);
        speedB = constrain(speedB, -255, 255);
        Serial.printf("通过MQTT设置电机PWM: A=%d, B=%d\n", speedA, speedB);
@@ -246,6 +268,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     if (!error && doc["key"].is<const char*>()) {
       String key = doc["key"].as<const char*>();
       if (key == "shutdown") {
+        extern int speedA, speedB;
+        speedA = 0;
+        speedB = 0;
         motor_control(0, 0);
         motor_control(1, 0);
         Serial.println("收到电机关闭命令，已自动归零速度");

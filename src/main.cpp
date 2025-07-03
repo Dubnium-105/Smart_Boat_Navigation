@@ -45,6 +45,10 @@ bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄�
 TaskHandle_t cameraTaskHandle = NULL;
 void cameraTask(void *pvParameters);
 
+// === 手动模式下电机速度全局变量 ===
+int speedA = 0;
+int speedB = 0;
+
 // --- Arduino Setup ---
 void setup() {
   Serial.begin(115200);
@@ -151,6 +155,9 @@ void loop() {
         }
         handleIRSignal();
     } else {
+        // 手动模式下持续驱动电机
+        motor_control(0, speedA);
+        motor_control(1, speedB);
         handleIRSignal();
     }
     delay(2); // 保持高帧率
