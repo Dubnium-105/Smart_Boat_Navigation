@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include <esp32-hal-ledc.h> // 显式包含ledc库
 
+// 角度表，0~7号传感器对应角度
+const int IR_ANGLES[8] = {0, 45, 90, 135, 180, 225, 270, 315};
+
 /**
  * 初始化电机控制函数 - 配置PWM通道和引脚
  */
@@ -61,4 +64,21 @@ void motor_control(uint8_t motor, int pwm_value) {
     ledcWrite(pin2_channel, 0);
     // Serial.printf("Motor %d Stop\n", motor);
   }
+}
+
+// 红外自动导航差速控制（最高速150）
+void motor_control_ir_auto(int mainDirIdx) {
+    if (mainDirIdx < 0 || mainDirIdx > 7) return;
+    int targetAngle = IR_ANGLES[mainDirIdx];
+    int delta = (targetAngle + 360) % 360;
+    if (delta > 180) delta -= 360; // -180~180
+    int baseSpeed = 120; // 默认速度
+    int maxSpeed = 150;  // 自动模式最高速
+    int diff = (delta * 2) / 90; // 45°时差速最大
+    int left = baseSpeed - diff * 60;
+    int right = baseSpeed + diff * 60;
+    left = constrain(left, -maxSpeed, maxSpeed);
+    right = constrain(right, -maxSpeed, maxSpeed);
+    motor_control(0, left);
+    motor_control(1, right);
 }

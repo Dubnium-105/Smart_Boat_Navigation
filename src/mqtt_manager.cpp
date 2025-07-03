@@ -1,48 +1,76 @@
 #include "mqtt_manager.h"
+static_assert(STATE_MANUAL == 0 && STATE_NAVIGATING == 1, "NAV_STATE 枚举未正确包含");
 #include "motor_control.h" // 需要调用电机控制函数
 #include <ArduinoJson.h>   // JSON处理库
 #include <esp_random.h>    // 用于生成随机客户端ID
 #include <HTTPUpdate.h>
 
-// 添加导航状态相关占位符变量
-enum NAV_STATE {
-  STATE_MANUAL = 0,     // 手动控制模式
-  STATE_NAVIGATING = 1  // 自动导航模式
-};
+// === 全局MQTT配置和唯一ID ===
+const char* mqttServer = "emqx.link2you.top";
+const int mqttPort = 1883;
+const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
+String g_clientId = "";
 
-// 全局导航状态变量
-int irNavState = STATE_MANUAL;
+// 导航控制模式变量（只在本文件定义一次）
+volatile int irNavState = STATE_MANUAL; // 0=手动，1=红外导航
+volatile int webRequestedNavState = STATE_MANUAL;
 unsigned long irStateStartTime = 0;
 
-// 占位函数，之前由navigation.h提供，现在直接内联在此处
+// 前置声明，确保所有函数可见
+void publishStatusInfo(const char* extraMsg);
+
+// 导航模式字符串
 String get_ir_nav_mode_str() {
   return irNavState == STATE_MANUAL ? "手动控制" : "红外导航";
 }
 
-// MQTT配置
-const char* mqttServer = "emqx.link2you.top";
-const int mqttPort = 1883;
-const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
-
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-
-// 声明来自stream.cpp的函数
-extern void configureStreamServer(bool enable, const char* serverUrl);
-
-// 全局保存本机clientId
-String g_clientId = "";
-
-void setupMQTT() {
-  randomSeed(esp_random()); // 使用ESP32硬件随机数生成器
-  mqttClient.setServer(mqttServer, mqttPort);
-  mqttClient.setCallback(mqtt_callback);
-  mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE); // 设置缓冲区大小
-  Serial.println("MQTT客户端已配置");
+// 设置导航模式
+void setNavMode(int mode) {
+  if (mode != irNavState) {
+    irNavState = mode;
+    irStateStartTime = millis();
+    Serial.printf("导航状态切换为: %s\n", get_ir_nav_mode_str().c_str());
+    // 可选：反馈当前状态到MQTT
+    JsonDocument doc;
+    doc["nav_mode"] = get_ir_nav_mode_str();
+    doc["timestamp"] = irStateStartTime;
+    String msg;
+    serializeJson(doc, msg);
+    mqttClient.publish("/nav_mode_feedback", msg.c_str());
+    // 新增：同步推送一次全量状态，确保前端刷新
+    publishStatusInfo("导航模式切换");
+  }
 }
 
-// 函数声明
+void setupMQTT() {
+  randomSeed(esp_random());
+  mqttClient.setServer(mqttServer, mqttPort);
+  mqttClient.setCallback(mqtt_callback);
+  mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE);
+  Serial.println("MQTT客户端已配置");
+  // 上线时主动推送一次完整状态
+  publishStatusInfo("ESP32-CAM已上线");
+}
 
+// 统一MQTT状态信息反馈函数前向声明
+
+void publishStatusInfo(const char* extraMsg) {
+  JsonDocument infoDoc;
+  infoDoc["msg"] = extraMsg ? extraMsg : "ESP32-CAM状态信息";
+  infoDoc["ip"] = WiFi.localIP().toString();
+  infoDoc["wifi_ssid"] = WiFi.SSID();
+  infoDoc["wifi_rssi"] = WiFi.RSSI();
+  infoDoc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+  infoDoc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
+  infoDoc["mode"] = get_ir_nav_mode_str();
+  infoDoc["clientId"] = g_clientId;
+  infoDoc["nav_state"] = irNavState;
+  infoDoc["web_nav_state"] = webRequestedNavState;
+  infoDoc["timestamp"] = millis();
+  String infoStr;
+  serializeJson(infoDoc, infoStr);
+  mqttClient.publish("/ESP32_info", infoStr.c_str());
+}
 
 bool mqtt_reconnect() {
   int attempts = 0;
@@ -63,23 +91,9 @@ bool mqtt_reconnect() {
       mqttClient.subscribe("/ota"); // 订阅OTA升级主题
       mqttClient.subscribe("/check_mqtt"); 
       mqttClient.subscribe("/motor_control"); // 订阅电机开关控制主题
-      mqttClient.subscribe("/navigation"); // 订阅控制模式切换主题      // 构造JSON格式上线信息，包含WiFi和系统状态
-      DynamicJsonDocument doc(512);
-      doc["msg"] = "ESP32-CAM已上线";
-      doc["ip"] = WiFi.localIP().toString();
-      doc["wifi_ssid"] = WiFi.SSID();
-      doc["wifi_rssi"] = WiFi.RSSI();
-      doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
-      doc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
-      doc["mode"] = get_ir_nav_mode_str();
-      doc["clientId"] = g_clientId;
-      String infoStr;
-      serializeJson(doc, infoStr);
-      mqttClient.publish("/ESP32_info", infoStr.c_str());
+      mqttClient.subscribe("/navigation"); // 订阅控制模式切换主题
+      publishStatusInfo("ESP32-CAM已上线");
       mqttClient.publish("/motor/status", "电机控制已就绪");
-      
-
-      
       return true;
     } else {
       Serial.print("MQTT连接失败, rc=");
@@ -124,17 +138,15 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
   // 处理电机控制消息
   if (strcmp(topic, "/motor") == 0) {
-    // 使用ArduinoJson解析JSON数据
-    DynamicJsonDocument doc(256); // 使用DynamicJsonDocument替代JsonDocument
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
-    
     if (error) {
       Serial.print("JSON解析失败: ");
       Serial.println(error.c_str());
       return;
     }
     // 新增：clientId过滤
-    if (doc.containsKey("clientId") && doc["clientId"].is<const char*>()) {
+    if (doc["clientId"].is<const char*>()) {
       String targetId = doc["clientId"].as<const char*>();
       if (targetId != g_clientId) {
         Serial.printf("忽略非本机指令，目标clientId=%s，本机clientId=%s\n", targetId.c_str(), g_clientId.c_str());
@@ -146,23 +158,18 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
     // 检查是否包含电机速度参数
     if (doc["speedA"].is<int>() && doc["speedB"].is<int>()) {
-       // 获取电机PWM值（直接使用，不映射）
        int speedA = doc["speedA"].as<int>();
        int speedB = doc["speedB"].as<int>();
-       speedA = constrain(speedA, -255, 255); // 限制PWM范围到-255~+255
-       speedB = constrain(speedB, -255, 255); // 限制PWM范围到-255~+255
-       
+       speedA = constrain(speedA, -255, 255);
+       speedB = constrain(speedB, -255, 255);
        Serial.printf("通过MQTT设置电机PWM: A=%d, B=%d\n", speedA, speedB);
-       motor_control(0, speedA); // 控制电机A，直接传入PWM值
-       motor_control(1, speedB); // 控制电机B，直接传入PWM值
-       
-       // 发送电机状态确认
-       DynamicJsonDocument resDoc(128);
+       motor_control(0, speedA);
+       motor_control(1, speedB);
+       JsonDocument resDoc;
        resDoc["speedA"] = speedA;
        resDoc["speedB"] = speedB;
-       resDoc["pwm_direct"] = true; // 标识使用直接PWM控制
+       resDoc["pwm_direct"] = true;
        resDoc["timestamp"] = millis();
-       
        String resStr;
        serializeJson(resDoc, resStr);
        mqttClient.publish("/motor/status", resStr.c_str());
@@ -170,43 +177,29 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
        Serial.println("JSON中缺少speedA或speedB字段或类型错误，应为整数。");
     }
   }
-// 处理导航状态切换消息
+  // 处理导航状态切换消息
   else if (strcmp(topic, "/navigation") == 0) {
-    DynamicJsonDocument doc(128);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     if (!error && doc["command"].is<const char*>()) {
       String cmd = doc["command"].as<const char*>();
       if (cmd == "manual") {
-        irNavState = STATE_MANUAL;
-        irStateStartTime = millis();
-        Serial.println("导航状态: 切换到手动控制模式");
+        webRequestedNavState = STATE_MANUAL;
+        setNavMode(STATE_MANUAL);
       } else if (cmd == "navigate") {
-        irNavState = STATE_NAVIGATING;
-        irStateStartTime = millis();
-        Serial.println("导航状态: 切换到自动导航模式");
+        webRequestedNavState = STATE_NAVIGATING;
+        setNavMode(STATE_NAVIGATING);
       } else {
         Serial.printf("收到未知导航命令: %s，未做处理\n", cmd.c_str());
-        // 可选：回复错误信息到MQTT或采取其他措施
       }
     }
   }
   // 处理MQTT连接检查
   else if (strcmp(topic, "/check_mqtt") == 0) {
-    mqttClient.publish("/check_mqtt_reply", "pong");
+    // 回复JSON格式，便于前端统一解析
+    mqttClient.publish("/check_mqtt_reply", "{\"msg\":\"pong\"}");
     Serial.println("收到/check_mqtt，已回复/pong");
-    JsonDocument infoDoc;
-    infoDoc["msg"] = "MQTT连接检查响应";
-    infoDoc["ip"] = WiFi.localIP().toString();
-    infoDoc["wifi_ssid"] = WiFi.SSID();
-    infoDoc["wifi_rssi"] = WiFi.RSSI();
-    infoDoc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
-    infoDoc["stream_url"] = "http://" + WiFi.localIP().toString() + "/stream";
-    infoDoc["mode"] = get_ir_nav_mode_str();
-    infoDoc["clientId"] = g_clientId;
-    String infoStr;
-    serializeJson(infoDoc, infoStr);
-    mqttClient.publish("/ESP32_info", infoStr.c_str());
-    Serial.println("已发送ESP32系统信息到/ESP32_info");
+    publishStatusInfo("MQTT连接检查响应");
   }
   // 处理OTA升级命令
   else if (strcmp(topic, "/ota") == 0) {
@@ -248,17 +241,15 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   }
   // 处理电机控制开关消息
   if (strcmp(topic, "/motor_control") == 0) {
-    DynamicJsonDocument doc(128);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     if (!error && doc["key"].is<const char*>()) {
       String key = doc["key"].as<const char*>();
       if (key == "shutdown") {
-        // 关闭电机，速度归零
         motor_control(0, 0);
         motor_control(1, 0);
         Serial.println("收到电机关闭命令，已自动归零速度");
-        // 发送状态确认
-        DynamicJsonDocument resDoc(128);
+        JsonDocument resDoc;
         resDoc["speedA"] = 0;
         resDoc["speedB"] = 0;
         resDoc["pwm_direct"] = true;
@@ -271,3 +262,6 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 }
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);

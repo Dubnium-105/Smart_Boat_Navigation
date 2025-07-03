@@ -22,16 +22,18 @@
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "motor_control.h"
-// --- 各模块功能开关 ---
-bool ENABLE_CAMERA = true;      // 是否启用摄像头
-bool ENABLE_MOTOR = true;       // 是否启用电机控制
-bool ENABLE_WIFI = true;        // 是否启用WiFi
-bool ENABLE_MQTT = true;        // 是否启用MQTT
-// 可根据需要添加更多模块开关
-// --- 声明外部函数和变量 ---
+#include "IR-control.h"
+
 extern void startSimpleCameraStream(); // 来自 stream.cpp
-extern httpd_handle_t stream_httpd;    // 来自 stream.cpp
-extern void streamLoop(); // 声明streamLoop函数，来自stream.cpp
+extern void streamLoop(); // 来自 stream.cpp
+
+// --- 补充IR与电机自动控制相关声明 ---
+extern int getMainIRDirection(const int irVals[8]);
+extern void motor_control_ir_auto(int mainDirIdx);
+
+// IR传感器引脚定义（请根据实际硬件修改）
+extern const int IR_PINS[8]; // 删除本地定义，使用头文件声明
+
 // 获取摄像头配置的函数
 sensor_t* sensor_get_config() {
     return esp_camera_sensor_get();
@@ -42,10 +44,6 @@ SemaphoreHandle_t frameAccessMutex = nullptr;
 bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
 TaskHandle_t cameraTaskHandle = NULL;
 void cameraTask(void *pvParameters);
-
-// 添加IR控制相关声明
-extern void setupIR();
-extern void handleIRSignal();
 
 // --- Arduino Setup ---
 void setup() {
@@ -103,9 +101,6 @@ void setup() {
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
 
-  // 初始化红外接收器
-  setupIR();
-  
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
   if (WiFi.status() == WL_CONNECTED) {
@@ -136,25 +131,27 @@ void cameraTask(void *pvParameters) {
 
 // --- Arduino Loop ---
 void loop() {
-    // 自动WiFi重连
     wifiAutoReconnect();
-  static unsigned long lastMqttReconnectAttempt = 0;
-  unsigned long currentTime = millis();
-
-  // 1. 处理MQTT连接和消息
-  if (!mqttClient.connected()) {
-    if (currentTime - lastMqttReconnectAttempt > 5000) {
-      lastMqttReconnectAttempt = currentTime;
-      Serial.println("MQTT断开连接，尝试重连...");
-      mqtt_reconnect();
+    static unsigned long lastMqttReconnectAttempt = 0;
+    unsigned long currentTime = millis();
+    if (!mqttClient.connected()) {
+        if (currentTime - lastMqttReconnectAttempt > 5000) {
+            lastMqttReconnectAttempt = currentTime;
+            mqtt_reconnect();
+        }
+    } else {
+        mqttClient.loop();
     }
-  } else {
-    mqttClient.loop();
-  }
-
-  // 处理红外信号
-  handleIRSignal();
-  
-  // loop() 不再采集摄像头帧，避免与cameraTask冲突
-  delay(2); // 保持高帧率
+    if (irNavState == STATE_NAVIGATING) {
+        int irVals[8];
+        for (int i = 0; i < 8; ++i) irVals[i] = digitalRead(IR_PINS[i]);
+        int mainDir = getMainIRDirection(irVals);
+        if (mainDir >= 0) {
+            motor_control_ir_auto(mainDir);
+        }
+        handleIRSignal();
+    } else {
+        handleIRSignal();
+    }
+    delay(2); // 保持高帧率
 }
