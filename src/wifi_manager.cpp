@@ -12,7 +12,8 @@ const WifiCredential wifiCredentials[] = {
   {"room@407", "room@407"},
   {"xbox", "12345678"},
   {"xbox", "z1139827642"},
-  {"Netcore-231AF8","1145141919"}
+  {"Netcore-231AF8","1145141919"},
+  {}
   // 可以添加更多WiFi凭据
 };
 const int numWifiOptions = sizeof(wifiCredentials) / sizeof(wifiCredentials[0]);

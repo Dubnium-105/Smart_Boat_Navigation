@@ -9,41 +9,15 @@
  * 推送master
  */
 #include <Arduino.h>
-#include "esp_camera.h"
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "esp_http_server.h" // 添加HTTP服务器头文件
 
 // --- 包含需要的模块的头文件 --- 
-#include "camera_setup.h"
 #include "wifi_manager.h"
 #include "mqtt_manager.h"
 #include "motor_control.h"
-#include "IR-control.h"
-
-extern void startSimpleCameraStream(); // 来自 stream.cpp
-extern void streamLoop(); // 来自 stream.cpp
-
-// --- 补充IR与电机自动控制相关声明 ---
-extern int getMainIRDirection(const int irVals[8]);
-extern void motor_control_ir_auto(int mainDirIdx);
-
-// IR传感器引脚定义（请根据实际硬件修改）
-extern const int IR_PINS[8]; // 删除本地定义，使用头文件声明
-
-// 获取摄像头配置的函数
-sensor_t* sensor_get_config() {
-    return esp_camera_sensor_get();
-}
-
-// --- 全局共享变量和同步原语 ---
-SemaphoreHandle_t frameAccessMutex = nullptr;
-bool cameraAvailable = false; // 全局摄像头可用标志，用于指示摄像头是否成功初始化。
-TaskHandle_t cameraTaskHandle = NULL;
-void cameraTask(void *pvParameters);
 
 // === 手动模式下电机速度全局变量 ===
 int speedA = 0;
@@ -57,35 +31,7 @@ void setup() {
   Serial.println("      船舶控制系统启动中...     ");
   Serial.println("====================================");
 
-  // 1. 创建互斥锁 (必须在任务使用前创建)
-  frameAccessMutex = xSemaphoreCreateMutex();
-  if (frameAccessMutex == NULL) {
-    Serial.println("错误: 无法创建帧访问互斥锁! 重启...");
-    delay(1000);
-    ESP.restart();
-  }
-  
-  // 2. 初始化摄像头 (增加重试机制)
-  const int maxCameraRetries = 3;
-  int cameraRetryCount = 0;
-  while (cameraRetryCount < maxCameraRetries) {
-    cameraAvailable = setupCamera();
-    if (cameraAvailable) {
-      printCameraSettings(); // 打印摄像头配置
-      break;
-    }
-    Serial.printf("摄像头初始化失败，重试中 (%d/%d)...\n", cameraRetryCount + 1, maxCameraRetries);
-    cameraRetryCount++;
-    delay(1000); // 等待1秒后重试
-  }
-  if (!cameraAvailable) {
-    Serial.println("摄像头初始化失败，启用降级模式：仅WiFi和MQTT功能");
-  }
-  // 3. 初始化红外接收器
-  Serial.println("初始化红外接收器...");
-  setupIR();
-
-  // 4. 初始化电机
+  // 1. 初始化电机
   setup_motors();
 
   // 5. 连接WiFi
@@ -101,9 +47,7 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
       mqtt_reconnect(); 
   }
-  // 7. 启动视频流服务器
-  startSimpleCameraStream(); 
-  Serial.println("视频流服务器已启动");
+  // Note: 视频流功能已移除，保留 MQTT 与电机控制
 
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
@@ -114,24 +58,9 @@ void setup() {
   }
   Serial.println("====================================");
 
-  // 启动摄像头推流任务（绑定core0）
-  xTaskCreatePinnedToCore(
-    cameraTask,         // 任务函数
-    "CameraTask",      // 名称
-    8192,              // 堆栈大小
-    NULL,              // 参数
-    2,                 // 优先级
-    &cameraTaskHandle, // 任务句柄
-    0                  // 绑定core0
-  );
+  // 不再创建摄像头推流任务
 }
 
-void cameraTask(void *pvParameters) {
-  while (1) {
-    streamLoop(); // 摄像头推流主循环
-    vTaskDelay(1); // 防止死循环卡死
-  }
-}
 
 // --- Arduino Loop ---
 void loop() {
@@ -146,19 +75,8 @@ void loop() {
     } else {
         mqttClient.loop();
     }
-    if (irNavState == STATE_NAVIGATING) {
-        int irVals[8];
-        for (int i = 0; i < 8; ++i) irVals[i] = digitalRead(IR_PINS[i]);
-        int mainDir = getMainIRDirection(irVals);
-        if (mainDir >= 0) {
-            motor_control_ir_auto(mainDir);
-        }
-        handleIRSignal();
-    } else {
-        // 手动模式下持续驱动电机
-        motor_control(0, speedA);
-        motor_control(1, speedB);
-        handleIRSignal();
-    }
+  // 一律使用 MQTT 控制的手动速度驱动电机
+  motor_control(0, speedA);
+  motor_control(1, speedB);
     delay(2); // 保持高帧率
 }
