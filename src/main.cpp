@@ -47,18 +47,10 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
       mqtt_reconnect(); 
   }
-  // Note: 视频流功能已移除，保留 MQTT 与电机控制
-
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
-  if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("访问: http://");
-      Serial.print(WiFi.localIP());
-      Serial.println(" 查看视频流");
-  }
   Serial.println("====================================");
 
-  // 不再创建摄像头推流任务
 }
 
 
