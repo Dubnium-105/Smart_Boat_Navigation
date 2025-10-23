@@ -1,15 +1,6 @@
 #ifndef WIFI_MANAGER_H
 #define WIFI_MANAGER_H
-
 #include <WiFi.h>
-
-// 固定IP设置
-#define USE_FIXED_IP false
-extern IPAddress staticIP;
-extern IPAddress gateway;
-extern IPAddress subnet;
-extern IPAddress dns;
-
 /**
  * @brief 尝试连接到预定义的WiFi网络列表中的一个。
  * 

@@ -1,21 +1,9 @@
 #include "wifi_manager.h"
+#include "config.h"
 #include <Arduino.h>
 
-// WiFi连接配置
-struct WifiCredential {
-  const char* ssid;
-  const char* password;
-};
+// WiFi凭据已移动到 config.h
 
-//WIFI 必须要是2.4G频段的,esp32-s3-CAM仅支持2.4G频段。
-const WifiCredential wifiCredentials[] = {
-  //{"CQCQ","12345678"},
-  {"xbox", "12345678"},
-  {"xbox", "z1139827642"},
-  {"room@407", "room@407"},
-  {"Netcore-231AF8","1145141919"},
-  // 可以添加更多WiFi凭据
-};
 const int numWifiOptions = sizeof(wifiCredentials) / sizeof(wifiCredentials[0]);
 
 bool connectWiFi() {
@@ -23,10 +11,8 @@ bool connectWiFi() {
   bool connected = false;
   for (int i = 0; i < numWifiOptions; i++) {
     Serial.printf("尝试连接WiFi: %s\n", wifiCredentials[i].ssid);
-    
     WiFi.begin(wifiCredentials[i].ssid, wifiCredentials[i].password);
     WiFi.setSleep(false);  // 禁用WiFi睡眠模式以提高响应性
-    
     // 尝试连接当前WiFi，最多等待约3秒 (12 * 250ms)
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 12) {
@@ -34,15 +20,13 @@ bool connectWiFi() {
       Serial.print(".");
       attempts++;
     } 
-    
     if (WiFi.status() == WL_CONNECTED) {
       connected = true;
       Serial.println("");
       Serial.printf("连接成功: %s\n", wifiCredentials[i].ssid);
-      
       // 设置固定IP
       if (USE_FIXED_IP) {
-        if (!WiFi.config(staticIP, gateway, subnet, dns)) {
+        if (!WiFi.config(STATIC_IP, GATEWAY, SUBNET, DNS)) {
           Serial.println("固定IP配置失败");
         } else {
           Serial.printf("IP地址: %s\n", WiFi.localIP().toString().c_str());
@@ -58,13 +42,11 @@ bool connectWiFi() {
       delay(500); // 短暂等待后尝试下一个
     }
   }
-  
   if (!connected) {
     Serial.println("无法连接到任何WiFi网络。");
   }
   return connected;
 }
-
 bool wifiAutoReconnect() {
     if (WiFi.status() == WL_CONNECTED) {
         return true;

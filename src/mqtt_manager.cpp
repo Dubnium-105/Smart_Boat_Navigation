@@ -1,117 +1,60 @@
 #include "mqtt_manager.h"
-static_assert(STATE_MANUAL == 0 && STATE_NAVIGATING == 1, "NAV_STATE 枚举未正确包含");
+#include "config.h"
 #include "motor_control.h" // 需要调用电机控制函数
 #include <ArduinoJson.h>   // JSON处理库
 #include <esp_random.h>    // 用于生成随机客户端ID
-
-// === 全局MQTT配置和唯一ID ===
-const char* mqttServer = "emqx.link2you.top";
-//const char* mqttServer = "47.93.157.148";
-//const char* mqttServer = "192.168.66.109";
-const int mqttPort = 1883;
-const int MAX_MQTT_PACKET_SIZE = 10240; // 增加缓冲区以防大数据包
 String g_clientId = "";
-
-// 导航控制模式变量（只在本文件定义一次）
-volatile int irNavState = STATE_MANUAL; // 0=手动，1=红外导航
-volatile int webRequestedNavState = STATE_MANUAL;
-unsigned long irStateStartTime = 0;
-
-// 前置声明，确保所有函数可见
 void publishStatusInfo(const char* extraMsg);
-
-// 导航模式字符串
-String get_ir_nav_mode_str() {
-  return irNavState == STATE_MANUAL ? "手动控制" : "红外导航";
-}
-
-// 设置导航模式
-void setNavMode(int mode) {
-  if (mode != irNavState) {
-    irNavState = mode;
-    irStateStartTime = millis();
-    Serial.printf("导航状态切换为: %s\n", get_ir_nav_mode_str().c_str());
-    // 切换模式时速度归零并停止电机
-    extern int speedA, speedB;
-    speedA = 0;
-    speedB = 0;
-    motor_control(0, 0);
-    motor_control(1, 0);
-    // 可选：反馈当前状态到MQTT
-    JsonDocument doc;
-    doc["nav_mode"] = get_ir_nav_mode_str();
-    doc["timestamp"] = irStateStartTime;
-    String msg;
-    serializeJson(doc, msg);
-    mqttClient.publish("/nav_mode_feedback", msg.c_str());
-    // 新增：同步推送一次全量状态，确保前端刷新
-    publishStatusInfo("导航模式切换");
-  }
-}
-
 void setupMQTT() {
   randomSeed(esp_random());
-  mqttClient.setServer(mqttServer, mqttPort);
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setCallback(mqtt_callback);
   mqttClient.setBufferSize(MAX_MQTT_PACKET_SIZE);
   Serial.println("MQTT客户端已配置");
-  // 上线时主动推送一次完整状态
-  publishStatusInfo("ESP32-CAM已上线");
+  // 注意：此时尚未建立与 Broker 的连接，避免在此处发布消息
 }
-
 // 统一MQTT状态信息反馈函数前向声明
-
 void publishStatusInfo(const char* extraMsg) {
   JsonDocument infoDoc;
-  infoDoc["msg"] = extraMsg ? extraMsg : "ESP32-CAM状态信息";
+  infoDoc["msg"] = extraMsg ? extraMsg : "设备状态信息";
   infoDoc["ip"] = WiFi.localIP().toString();
   infoDoc["wifi_ssid"] = WiFi.SSID();
   infoDoc["wifi_rssi"] = WiFi.RSSI();
   infoDoc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
-  infoDoc["mode"] = get_ir_nav_mode_str();
   infoDoc["clientId"] = g_clientId;
-  infoDoc["nav_state"] = irNavState;
-  infoDoc["web_nav_state"] = webRequestedNavState;
   infoDoc["timestamp"] = millis();
   String infoStr;
   serializeJson(infoDoc, infoStr);
   mqttClient.publish("/ESP32_info", infoStr.c_str());
 }
-
-// 发送红外方向信息到MQTT
-void publishIRInfo(int sensorId, const char* direction, int angle) {
-  if (mqttClient.connected()) {
-    JsonDocument irDoc;
-    irDoc["direction"] = direction;
-    irDoc["sensor_id"] = sensorId;
-    irDoc["angle"] = angle;
-    irDoc["timestamp"] = millis();
-    
-    String irInfoStr;
-    serializeJson(irDoc, irInfoStr);
-    mqttClient.publish("/ir_info", irInfoStr.c_str());
-  }
-}
-
 bool mqtt_reconnect() {
   int attempts = 0;
   while (!mqttClient.connected() && attempts < 5) {
     attempts++;
     Serial.print("尝试MQTT连接...");
     // 创建一个随机的客户端ID
-    String clientId = "ESP32-CAM-";
-    clientId += "黑色大船"; // TODO: 可根据实际硬件唯一标识生成
+    String clientId = "ESP32-";
+    clientId += SHIP_NAME;
     g_clientId = clientId; // 保存全局
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("已连接到MQTT服务器");
-      
-  // 订阅控制相关主题（保留必要的主题）
+  // 订阅控制相关主题
   mqttClient.subscribe("/motor"); // 电机控制
   mqttClient.subscribe("/restart");
   mqttClient.subscribe("/check_mqtt"); 
   mqttClient.subscribe("/motor_control"); // 电机开关控制
-  mqttClient.subscribe("/navigation"); // 控制模式切换
-      publishStatusInfo("ESP32-CAM已上线");
+  mqttClient.subscribe("/check_mqtt_reply"); // 前端对上线广播的回执
+  publishStatusInfo("设备已上线");
+      // 连接成功后，向 /check_mqtt 发送一次上线广播，告知网页端
+      {
+        JsonDocument onlineDoc;
+        onlineDoc["cmd"] = "device_online";
+        onlineDoc["clientId"] = g_clientId;
+        onlineDoc["timestamp"] = millis();
+        String onlineStr;
+        serializeJson(onlineDoc, onlineStr);
+        mqttClient.publish("/check_mqtt", onlineStr.c_str());
+      }
       mqttClient.publish("/motor/status", "电机控制已就绪");
       return true;
     } else {
@@ -126,26 +69,22 @@ bool mqtt_reconnect() {
   }
   return mqttClient.connected();
 }
-
-
-
 void loopMQTT() {
+  static unsigned long lastMqttReconnectAttempt = 0;
+  unsigned long now = millis();
   if (!mqttClient.connected()) {
-    // 如果未连接，则尝试重连（可以增加重连间隔逻辑）
-    // mqtt_reconnect(); // 在主循环中更精细地控制重连时机
+    if (now - lastMqttReconnectAttempt > 5000) {
+      lastMqttReconnectAttempt = now;
+      mqtt_reconnect();
+    }
   } else {
-    // 处理MQTT消息
     mqttClient.loop();
-    
-  
   }
 }
-
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   Serial.printf("收到MQTT消息: 主题=%s, 长度=%d\n", topic, length);
-  
   // 将接收到的数据转换为字符串以便调试 (确保缓冲区足够大)
-  char message[256]; // 增加缓冲区大小
+  char message[256]; 
   if (length < sizeof(message) - 1) {
       memcpy(message, payload, length);
       message[length] = '\0'; // 添加字符串结束符
@@ -197,35 +136,33 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
        Serial.println("JSON中缺少speedA或speedB字段或类型错误，应为整数。");
     }
   }
-  // 处理导航状态切换消息
-  else if (strcmp(topic, "/navigation") == 0) {
+  // 处理MQTT连接检查与设备上线广播
+  else if (strcmp(topic, "/check_mqtt") == 0) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload, length);
-    if (!error && doc["command"].is<const char*>()) {
-      String cmd = doc["command"].as<const char*>();
-      if (cmd == "manual") {
-        webRequestedNavState = STATE_MANUAL;
-        setNavMode(STATE_MANUAL);
-      } else if (cmd == "navigate") {
-        webRequestedNavState = STATE_NAVIGATING;
-        setNavMode(STATE_NAVIGATING);
-      } else {
-        Serial.printf("收到未知导航命令: %s，未做处理\n", cmd.c_str());
-      }
+    if (error) {
+      Serial.print("/check_mqtt JSON解析失败: ");
+      Serial.println(error.c_str());
+      return;
+    }
+
+    const char* cmd = doc["cmd"] | "";
+    if (strcmp(cmd, "ping") == 0) {
+      // 前端健康检查请求 → 回复 pong 并附加一次状态
+      mqttClient.publish("/check_mqtt_reply", "{\"msg\":\"pong\"}");
+      Serial.println("收到/check_mqtt ping，已回复/pong");
+      publishStatusInfo("MQTT连接检查响应");
+    } else if (strcmp(cmd, "device_online") == 0) {
+      // 忽略自身发出的上线广播，不做回应
+      // 可在此扩展：记录其他设备上线事件
+      Serial.println("收到设备上线广播(device_online)，已忽略");
+    } else {
+      Serial.printf("未知的 /check_mqtt cmd: %s\n", cmd);
     }
   }
-  // 处理MQTT连接检查
-  else if (strcmp(topic, "/check_mqtt") == 0) {
-    // 回复JSON格式，便于前端统一解析
-    mqttClient.publish("/check_mqtt_reply", "{\"msg\":\"pong\"}");
-    Serial.println("收到/check_mqtt，已回复/pong");
-    publishStatusInfo("MQTT连接检查响应");
-  }
-  // OTA 功能已移除，如需恢复请重新添加 httpUpdate 逻辑
   // 处理重启命令
   else if (strcmp(topic, "/restart") == 0) {
     Serial.println("收到重启命令，准备重启...");
-    mqttClient.publish("/OTA_info", "即将重启ESP32");
     delay(1000);
     ESP.restart();
   }
@@ -241,7 +178,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
         speedB = 0;
         motor_control(0, 0);
         motor_control(1, 0);
-        Serial.println("收到电机关闭命令，已自动归零速度");
+        Serial.println("收到电机关闭命令，停止");
         JsonDocument resDoc;
         resDoc["speedA"] = 0;
         resDoc["speedB"] = 0;
@@ -253,6 +190,24 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       }
     }
     return;
+  }
+
+  // 处理网页端对设备上线的回执
+  if (strcmp(topic, "/check_mqtt_reply") == 0) {
+    JsonDocument rep;
+    DeserializationError err = deserializeJson(rep, payload, length);
+    if (err) {
+      Serial.print("/check_mqtt_reply JSON解析失败: ");
+      Serial.println(err.c_str());
+      return;
+    }
+    // 仅处理发给本设备的回执（to == g_clientId）
+    const char* to = rep["to"] | "";
+    if (to[0] && g_clientId == String(to)) {
+      const char* webId = rep["webId"] | "";
+      const char* msg = rep["msg"] | "";
+      Serial.printf("收到网页端回执: webId=%s, msg=%s\n", webId, msg);
+    }
   }
 }
 
