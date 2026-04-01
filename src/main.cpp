@@ -154,6 +154,9 @@ void loop() {
             motor_control_ir_auto(mainDir);
         }
         handleIRSignal();
+    } else if (irNavState == STATE_MISSION) {
+        motor_control(0, 0);
+        motor_control(1, 0);
     } else {
         // 手动模式下持续驱动电机
         motor_control(0, speedA);

@@ -3,7 +3,8 @@
 
 enum NAV_STATE {
   STATE_MANUAL = 0,
-  STATE_NAVIGATING = 1
+  STATE_NAVIGATING = 1,
+  STATE_MISSION = 2
 };
 
 #include <PubSubClient.h>
@@ -15,6 +16,7 @@ extern PubSubClient mqttClient;
 extern volatile int irNavState;
 extern volatile int webRequestedNavState;
 String get_ir_nav_mode_str();
+String get_device_id();
 void setNavMode(int mode);
 void setupMQTT();
 bool mqtt_reconnect();
