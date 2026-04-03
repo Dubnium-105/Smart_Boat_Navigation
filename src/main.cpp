@@ -144,7 +144,7 @@ void loop() {
             mqtt_reconnect();
         }
     } else {
-        mqttClient.loop();
+      loopMQTT();
     }
     if (irNavState == STATE_NAVIGATING) {
         int irVals[8];
