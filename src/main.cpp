@@ -19,10 +19,14 @@
 
 // --- 包含需要的模块的头文件 --- 
 #include "camera_setup.h"
-#include "wifi_manager.h"
+#include "network_service.h"
 #include "mqtt_manager.h"
 #include "motor_control.h"
 #include "IR-control.h"
+
+#ifndef NETWORK_4G_MODULE_TEST
+#define NETWORK_4G_MODULE_TEST 0
+#endif
 
 extern void startSimpleCameraStream(); // 来自 stream.cpp
 extern void streamLoop(); // 来自 stream.cpp
@@ -66,6 +70,10 @@ void setup() {
   }
   
   // 2. 初始化摄像头 (增加重试机制)
+  #if NETWORK_4G_MODULE_TEST
+  Serial.println("[4G-TEST] skip camera init to avoid modem UART pin conflicts");
+  cameraAvailable = false;
+  #else
   const int maxCameraRetries = 3;
   int cameraRetryCount = 0;
   while (cameraRetryCount < maxCameraRetries) {
@@ -83,31 +91,54 @@ void setup() {
   }
   // 3. 初始化红外接收器
   Serial.println("初始化红外接收器...");
+  #endif
   setupIR();
 
   // 4. 初始化电机
   setup_motors();
 
-  // 5. 连接WiFi
-  if (!connectWiFi()) {
-    Serial.println("WiFi连接失败，重启...");
+  // 5. 初始化并连接网络服务: WiFi优先，4G兜底
+  setupNetworkService();
+  if (!connectNetworkService()) {
+#if NETWORK_4G_MODULE_TEST
+    Serial.println("[4G-TEST] 首次连接失败，将在循环中持续重试，不重启。");
+#else
+    Serial.println("网络服务连接失败（WiFi+4G），重启...");
     delay(1000);
     ESP.restart();
+#endif
   }
 
-  // 5. 初始化MQTT客户端
-  setupMQTT();
-  // 首次尝试连接MQTT (如果WiFi连接成功)
-  if (WiFi.status() == WL_CONNECTED) {
-      mqtt_reconnect(); 
+  NetworkServiceStatus netStatus = getNetworkServiceStatus();
+  Serial.printf("网络服务就绪，当前链路=%s\n", activeNetworkName(netStatus.activeNetwork));
+
+  if (netStatus.activeNetwork == ActiveNetworkType::Cellular4G) {
+    Serial.println("当前运行在4G兜底链路");
   }
+
+  // 6. 初始化MQTT客户端
+#if NETWORK_4G_MODULE_TEST
+  Serial.println("[4G-TEST] 已跳过MQTT初始化，进入4G模块单测模式");
+#else
+  setupMQTT();
+  // 首次尝试连接MQTT（当前仅WiFi承载）
+  if (isMqttPathReady()) {
+      mqtt_reconnect(); 
+  } else {
+      Serial.println("当前为4G兜底网络，MQTT等待WiFi恢复后再连接");
+  }
+#endif
   // 7. 启动视频流服务器
+#if NETWORK_4G_MODULE_TEST
+  Serial.println("[4G-TEST] 已跳过视频流启动");
+#else
   startSimpleCameraStream(); 
   Serial.println("视频流服务器已启动");
+#endif
 
   Serial.println("====================================");
   Serial.println("       系统初始化完成!          ");
-  if (WiFi.status() == WL_CONNECTED) {
+    if (netStatus.wifiConnected) {
       Serial.print("访问: http://");
       Serial.print(WiFi.localIP());
       Serial.println(" 查看视频流");
@@ -115,6 +146,7 @@ void setup() {
   Serial.println("====================================");
 
   // 启动摄像头推流任务（绑定core0）
+  #if !NETWORK_4G_MODULE_TEST
   xTaskCreatePinnedToCore(
     cameraTask,         // 任务函数
     "CameraTask",      // 名称
@@ -124,21 +156,27 @@ void setup() {
     &cameraTaskHandle, // 任务句柄
     0                  // 绑定core0
   );
+  #endif
 }
 
 void cameraTask(void *pvParameters) {
   while (1) {
+#if !NETWORK_4G_MODULE_TEST
     streamLoop(); // 摄像头推流主循环
+#endif
     vTaskDelay(1); // 防止死循环卡死
   }
 }
 
 // --- Arduino Loop ---
 void loop() {
-    wifiAutoReconnect();
+    networkServiceLoop();
+#if !NETWORK_4G_MODULE_TEST
     static unsigned long lastMqttReconnectAttempt = 0;
     unsigned long currentTime = millis();
-    if (!mqttClient.connected()) {
+    if (!isMqttPathReady()) {
+      // 仅在WiFi就绪时重连MQTT，4G作为链路兜底不进入当前MQTT通道。
+    } else if (!mqttClient.connected()) {
         if (currentTime - lastMqttReconnectAttempt > 5000) {
             lastMqttReconnectAttempt = currentTime;
             mqtt_reconnect();
@@ -146,6 +184,7 @@ void loop() {
     } else {
         mqttClient.loop();
     }
+  #endif
     if (irNavState == STATE_NAVIGATING) {
         int irVals[8];
         for (int i = 0; i < 8; ++i) irVals[i] = digitalRead(IR_PINS[i]);
