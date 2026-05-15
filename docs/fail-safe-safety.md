@@ -75,6 +75,249 @@
 
 红外自动导航 `motor_control_ir_auto()` 和 `motor_control_ir_navigation()` 也在差速计算后调用 `safetyGuardMotorCommand()`，确保自动导航输出同样受心跳、围栏和电池保护约束。
 
+## 状态机设计
+
+### 1. Fail-safe 总体状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Booting: 上电/复位
+    Booting --> Normal: setupSafetyManager完成
+    Normal --> Normal: 心跳、围栏、电池、指令均正常
+    Normal --> HeartbeatLost: 心跳超时
+    Normal --> GeoFenceViolation: 越界
+    Normal --> LowBattery: 电压低于阈值
+    Normal --> CommandRejected: 指令未通过白名单/限速
+    HeartbeatLost --> FailSafeStop: 立即停车
+    GeoFenceViolation --> ReturnHomePending: 停车并标记返航
+    LowBattery --> ReturnHomePending: 停车并标记返航
+    CommandRejected --> Normal: 拒绝本次指令
+    ReturnHomePending --> Normal: 遥测恢复且人工/上位机确认
+    FailSafeStop --> Normal: 心跳恢复且所有保护条件正常
+    Normal --> OtaPreparing: 接收OTA且通过灰度策略
+    OtaPreparing --> OtaUpdating: 停车并开始写入镜像
+    OtaUpdating --> Booting: 升级成功后重启
+    OtaUpdating --> Rollback: 升级失败或新镜像自检失败
+    Rollback --> Booting: 回滚旧镜像并重启
+```
+
+该状态机以 `safetyLoop()` 为核心周期巡检入口，以 `motor_control()` 的安全总闸作为最后保护层。正常状态下系统允许手动控制、红外导航和任务模式运行；一旦心跳、电池、围栏任一条件异常，系统会优先停车，再根据异常原因进入 Fail-safe 停车或返航待处理状态。
+
+### 2. 指令处理状态机
+
+```mermaid
+flowchart TD
+    A[收到MQTT/上位机指令] --> B{是否在白名单内}
+    B -- 否 --> R1[拒绝执行: command_not_whitelisted]
+    B -- 是 --> C{是否超过速率限制}
+    C -- 否 --> R2[拒绝执行: command_rate_limited]
+    C -- 是 --> D{目标device_id是否匹配}
+    D -- 否 --> R3[拒绝执行: BAD_DEVICE_ID]
+    D -- 是 --> E{JSON字段与参数范围是否合法}
+    E -- 否 --> R4[拒绝执行: BAD_PARAM_RANGE/BAD_JSON]
+    E -- 是 --> F{安全状态是否允许运动}
+    F -- 否 --> S[电机输出钳制为0并记录原因]
+    F -- 是 --> G[执行指令并发布ACK/状态]
+```
+
+该流程用于说明指令进入系统后的多级过滤顺序：先过滤指令类型，再做频率控制，然后检查设备目标与参数合法性，最后由安全总闸决定是否允许产生电机输出。
+
+### 3. OTA 灰度与回滚状态机
+
+```mermaid
+flowchart TD
+    A[收到OTA命令] --> B{URL是否有效}
+    B -- 否 --> R1[拒绝: missing url]
+    B -- 是 --> C{灰度比例是否命中本设备}
+    C -- 否 --> R2[拒绝: rollout bucket not matched]
+    C -- 是 --> D[停车并进入OTA准备]
+    D --> E[下载并写入新镜像]
+    E --> F{写入是否成功}
+    F -- 否 --> R3[保持旧镜像并上报失败]
+    F -- 是 --> G[重启进入新镜像]
+    G --> H{启动自检是否通过}
+    H -- 是 --> I[标记镜像有效]
+    H -- 否 --> J[请求回滚旧镜像]
+```
+
+## 关键算法伪代码
+
+### 1. 安全巡检主循环
+
+```text
+Algorithm safetyLoop
+Input: lastHeartbeatMs, batteryVoltage, currentPosition, geofenceConfig
+Output: safetyStatus, motorStopAction
+
+1. now <- millis()
+2. if now - lastHeartbeatMs > HEARTBEAT_TIMEOUT then
+3.     heartbeatOk <- false
+4.     stopMotors("heartbeat_timeout")
+5. else
+6.     heartbeatOk <- true
+7. end if
+
+8. if batteryVoltage is valid and batteryVoltage < LOW_BATTERY_VOLTAGE then
+9.     batteryOk <- false
+10.    returningHome <- true
+11.    stopMotors("low_battery_return_home")
+12. else
+13.    batteryOk <- true
+14. end if
+
+15. if geofenceEnabled and currentPosition is valid then
+16.    distance <- haversine(currentPosition, fenceCenter)
+17.    if distance > fenceRadius then
+18.        geofenceOk <- false
+19.        returningHome <- true
+20.        stopMotors("geofence_violation")
+21.    else
+22.        geofenceOk <- true
+23.    end if
+24. end if
+
+25. if heartbeatOk and batteryOk and geofenceOk and commandOk then
+26.    failSafeActive <- false
+27. else
+28.    failSafeActive <- true
+29. end if
+```
+
+### 2. 电机输出安全钳制
+
+```text
+Algorithm safetyGuardMotorCommand
+Input: leftPwm, rightPwm, safetyStatus
+Output: guardedLeftPwm, guardedRightPwm, allowed
+
+1. call safetyLoop()
+2. if failSafeActive == true or heartbeatOk == false or batteryOk == false or geofenceOk == false then
+3.     guardedLeftPwm <- 0
+4.     guardedRightPwm <- 0
+5.     allowed <- false
+6. else
+7.     guardedLeftPwm <- constrain(leftPwm, -255, 255)
+8.     guardedRightPwm <- constrain(rightPwm, -255, 255)
+9.     allowed <- true
+10. end if
+11. return allowed
+```
+
+### 3. 地理围栏判断算法
+
+```text
+Algorithm checkGeoFence
+Input: currentLatitude, currentLongitude, centerLatitude, centerLongitude, radiusMeters
+Output: geofenceOk
+
+1. if geofence is disabled then return true
+2. if current position is invalid then return true
+3. dLat <- radians(currentLatitude - centerLatitude)
+4. dLon <- radians(currentLongitude - centerLongitude)
+5. a <- sin(dLat/2)^2 + cos(radians(centerLatitude)) * cos(radians(currentLatitude)) * sin(dLon/2)^2
+6. c <- 2 * atan2(sqrt(a), sqrt(1-a))
+7. distance <- EARTH_RADIUS_METERS * c
+8. if distance > radiusMeters then
+9.     return false
+10. else
+11.    return true
+12. end if
+```
+
+### 4. 指令白名单与速率限制
+
+```text
+Algorithm safetyAcceptCommand
+Input: commandKey, lastAcceptedTimeMap, whitelist
+Output: accepted, rejectReason
+
+1. if commandKey not in whitelist then
+2.     accepted <- false
+3.     rejectReason <- "command_not_whitelisted"
+4.     return
+5. end if
+
+6. now <- millis()
+7. last <- lastAcceptedTimeMap[commandKey]
+8. if now - last < COMMAND_MIN_INTERVAL_MS then
+9.     accepted <- false
+10.    rejectReason <- "command_rate_limited"
+11.    return
+12. end if
+
+13. lastAcceptedTimeMap[commandKey] <- now
+14. accepted <- true
+15. rejectReason <- ""
+```
+
+### 5. OTA 灰度分桶算法
+
+```text
+Algorithm safetyShouldAcceptOta
+Input: deviceId, rolloutPercent
+Output: accepted
+
+1. percent <- constrain(rolloutPercent, 0, 100)
+2. hash <- FNV1a(deviceId)
+3. bucket <- hash mod 100
+4. if bucket < percent then
+5.     accepted <- true
+6. else
+7.     accepted <- false
+8. end if
+9. return accepted
+```
+
+## 实验数据记录预留位置
+
+### 1. 心跳超时停车实验记录
+
+| 实验编号 | 测试日期 | 心跳周期/ms | 设置超时/ms | 断开心跳时间 | 实际停车延迟/ms | 左电机最终PWM | 右电机最终PWM | 是否触发Fail-safe | 备注 |
+|---|---|---:|---:|---|---:|---:|---:|---|---|
+| HB-01 |  |  | 3000 |  |  | 0 | 0 |  |  |
+| HB-02 |  |  | 3000 |  |  | 0 | 0 |  |  |
+| HB-03 |  |  | 3000 |  |  | 0 | 0 |  |  |
+
+### 2. 地理围栏越界保护实验记录
+
+| 实验编号 | 测试日期 | 围栏中心坐标 | 围栏半径/m | 测试点坐标 | 计算距离/m | 期望结果 | 实际结果 | 电机是否停车 | 备注 |
+|---|---|---|---:|---|---:|---|---|---|---|
+| GF-01 |  |  | 120 |  |  | 围栏内允许运行 |  |  |  |
+| GF-02 |  |  | 120 |  |  | 越界停车 |  |  |  |
+| GF-03 |  |  | 120 |  |  | 越界停车并标记返航 |  |  |  |
+
+### 3. 电量低返航实验记录
+
+| 实验编号 | 测试日期 | 输入电压/V | 低电阈值/V | 初始模式 | 期望结果 | 实际结果 | returningHome状态 | last_stop_reason | 备注 |
+|---|---|---:|---:|---|---|---|---|---|---|
+| BAT-01 |  | 7.40 | 6.80 | 手动 | 正常运行 |  | false |  |  |
+| BAT-02 |  | 6.70 | 6.80 | 手动 | 停车并标记返航 |  | true | low_battery_return_home |  |
+| BAT-03 |  | 6.50 | 6.80 | 自动导航 | 停车并标记返航 |  | true | low_battery_return_home |  |
+
+### 4. OTA 灰度与回滚实验记录
+
+| 实验编号 | 测试日期 | device_id | rolloutPercent | bucket | 是否命中灰度 | OTA URL | 下载结果 | 新镜像启动结果 | 是否回滚 | 备注 |
+|---|---|---|---:|---:|---|---|---|---|---|---|
+| OTA-01 |  |  | 10 |  |  |  |  |  |  |  |
+| OTA-02 |  |  | 50 |  |  |  |  |  |  |  |
+| OTA-03 |  |  | 100 |  | 是 |  |  |  |  |  |
+
+### 5. 指令白名单与速率限制实验记录
+
+| 实验编号 | 测试日期 | 指令类型 | 指令间隔/ms | 是否在白名单 | 期望结果 | 实际结果 | rejectReason | 备注 |
+|---|---|---|---:|---|---|---|---|---|
+| CMD-01 |  | motor | 100 | 是 | 接受 |  |  |  |
+| CMD-02 |  | motor | 20 | 是 | 限速拒绝 |  | command_rate_limited |  |
+| CMD-03 |  | unknown_cmd | 100 | 否 | 白名单拒绝 |  | command_not_whitelisted |  |
+
+### 6. 综合安全联调记录
+
+| 实验编号 | 测试日期 | 场景描述 | 初始模式 | 触发条件 | 期望状态迁移 | 实际状态迁移 | MQTT状态上报是否正常 | 结论 | 备注 |
+|---|---|---|---|---|---|---|---|---|---|
+| SYS-01 |  | 手动航行中心跳中断 | 手动 | 心跳超时 | Normal -> FailSafeStop |  |  |  |  |
+| SYS-02 |  | 自动导航越界 | 红外导航 | GPS越界 | Normal -> ReturnHomePending |  |  |  |  |
+| SYS-03 |  | OTA升级前停车 | 手动 | OTA命令 | Normal -> OtaPreparing -> OtaUpdating |  |  |  |  |
+
 ## 状态上报
 
 安全模块提供 `safetyStatusJson()`，可生成以下关键字段：
