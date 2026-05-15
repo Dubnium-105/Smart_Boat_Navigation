@@ -1,4 +1,5 @@
 #include "motor_control.h"
+#include "safety_manager.h"
 #include <Arduino.h>
 #include <esp32-hal-ledc.h> // 显式包含ledc库
 
@@ -38,6 +39,12 @@ void setup_motors() {
 void motor_control(uint8_t motor, int pwm_value) {
   // 确保PWM值在-255到255范围内
   pwm_value = constrain(pwm_value, -255, 255);
+
+  // Fail-safe总闸：所有非零电机输出都必须经过安全模块许可。
+  // 停车指令始终放行，避免安全模块触发停车时被自身拦截。
+  if (pwm_value != 0 && !safetyAllowsMotion()) {
+    pwm_value = 0;
+  }
   
   uint8_t pin1_channel, pin2_channel;
   
@@ -79,6 +86,7 @@ void motor_control_ir_auto(int mainDirIdx) {
     int right = baseSpeed + diff * 60;
     left = constrain(left, -maxSpeed, maxSpeed);
     right = constrain(right, -maxSpeed, maxSpeed);
+    safetyGuardMotorCommand(left, right, "ir_auto");
     motor_control(0, left);
     motor_control(1, right);
 }
@@ -101,6 +109,7 @@ void motor_control_ir_navigation(int mainDirIdx, bool forceStop) {
     int right = baseSpeed + diff * 60;
     left = constrain(left, -maxSpeed, maxSpeed);
     right = constrain(right, -maxSpeed, maxSpeed);
+    safetyGuardMotorCommand(left, right, "ir_navigation");
     motor_control(0, left);
     motor_control(1, right);
 }
