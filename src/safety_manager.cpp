@@ -8,6 +8,10 @@
 #include <esp_ota_ops.h>
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #ifndef SAFETY_HEARTBEAT_TIMEOUT_MS
 #define SAFETY_HEARTBEAT_TIMEOUT_MS 3000UL
 #endif
@@ -50,33 +54,16 @@ double g_fenceLon = SAFETY_DEFAULT_LONGITUDE;
 float g_fenceRadiusM = SAFETY_GEOFENCE_RADIUS_M;
 
 CommandRateSlot g_rateSlots[] = {
-    {"heartbeat", 0},
-    {"legacy_motor", 0},
-    {"legacy_navigation", 0},
-    {"legacy_ota", 0},
-    {"legacy_restart", 0},
-    {"legacy_shutdown", 0},
-    {"motor", 0},
-    {"nav_mode", 0},
-    {"mission", 0},
-    {"ota", 0},
-    {"restart", 0},
-    {"safety", 0},
+    {"heartbeat", 0}, {"legacy_motor", 0}, {"legacy_navigation", 0},
+    {"legacy_ota", 0}, {"legacy_restart", 0}, {"legacy_shutdown", 0},
+    {"motor", 0}, {"nav_mode", 0}, {"mission", 0},
+    {"ota", 0}, {"restart", 0}, {"safety", 0},
 };
 
 const char* kCommandWhitelist[] = {
-    "heartbeat",
-    "legacy_motor",
-    "legacy_navigation",
-    "legacy_ota",
-    "legacy_restart",
-    "legacy_shutdown",
-    "motor",
-    "nav_mode",
-    "mission",
-    "ota",
-    "restart",
-    "safety",
+    "heartbeat", "legacy_motor", "legacy_navigation", "legacy_ota",
+    "legacy_restart", "legacy_shutdown", "motor", "nav_mode",
+    "mission", "ota", "restart", "safety",
 };
 
 bool isWhitelisted(const char* commandKey) {
@@ -184,7 +171,6 @@ void evaluateGeofence() {
 }  // namespace
 
 void setupSafetyManager() {
-  memset(&g_status, 0, sizeof(g_status));
   g_status.heartbeatOk = true;
   g_status.geofenceOk = true;
   g_status.batteryOk = true;
