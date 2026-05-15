@@ -23,6 +23,7 @@
 #include "mqtt_manager.h"
 #include "motor_control.h"
 #include "IR-control.h"
+#include "safety_manager.h"
 
 #ifndef NETWORK_4G_MODULE_TEST
 #define NETWORK_4G_MODULE_TEST 0
@@ -94,8 +95,10 @@ void setup() {
   #endif
   setupIR();
 
-  // 4. 初始化电机
+  // 4. 初始化电机与安全保护模块
   setup_motors();
+  setupSafetyManager();
+  safetyMarkBootSuccessful();
 
   // 5. 初始化并连接网络服务: WiFi优先，4G兜底
   setupNetworkService();
@@ -171,6 +174,7 @@ void cameraTask(void *pvParameters) {
 // --- Arduino Loop ---
 void loop() {
     networkServiceLoop();
+    safetyLoop();
 #if !NETWORK_4G_MODULE_TEST
     static unsigned long lastMqttReconnectAttempt = 0;
     unsigned long currentTime = millis();
@@ -190,7 +194,12 @@ void loop() {
         for (int i = 0; i < 8; ++i) irVals[i] = digitalRead(IR_PINS[i]);
         int mainDir = getMainIRDirection(irVals);
         if (mainDir >= 0) {
-            motor_control_ir_auto(mainDir);
+            if (safetyAllowsMotion()) {
+                motor_control_ir_auto(mainDir);
+            } else {
+                motor_control(0, 0);
+                motor_control(1, 0);
+            }
         }
         handleIRSignal();
     } else if (irNavState == STATE_MISSION) {
@@ -198,8 +207,11 @@ void loop() {
         motor_control(1, 0);
     } else {
         // 手动模式下持续驱动电机
-        motor_control(0, speedA);
-        motor_control(1, speedB);
+        int guardedA = speedA;
+        int guardedB = speedB;
+        safetyGuardMotorCommand(guardedA, guardedB, "manual_loop");
+        motor_control(0, guardedA);
+        motor_control(1, guardedB);
         handleIRSignal();
     }
     delay(2); // 保持高帧率
